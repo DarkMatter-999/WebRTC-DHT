@@ -1,0 +1,18 @@
+{
+  "name": "webrtc-dht",
+  "version": "1.0.0",
+  "description": "Distributed Hash table (Kademlia) using WebRTC",
+  "license": "MIT",
+  "author": "DarkMatter-999",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "signalling": "node src/signalling",
+    "peer": "node src/peer"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.3",
+    "wrtc": "^0.4.7",
+    "ws": "^8.18.3"
+  }
+}
