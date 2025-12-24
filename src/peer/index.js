@@ -1,6 +1,12 @@
 import WebSocket from 'ws';
 import wrtc from 'wrtc';
-import { createNodeId } from './utils.js';
+import {
+  createNodeId,
+  decodeMessage,
+  encodePing,
+  encodePong,
+} from './utils.js';
+import { MSG_PING, MSG_PONG } from './constants.js';
 
 const SIGNAL_URL = `ws://localhost:${process.env.SIGNALLING_PORT || 3000}`;
 const peerId = createNodeId();
@@ -24,10 +30,10 @@ socket.on('open', () => {
 socket.on('message', async (data) => {
   const msg = JSON.parse(data);
 
-  if ('peers' === msg.type  && msg?.peers?.length && !pc) {
+  if ('peers' === msg.type && msg?.peers?.length && !pc) {
     const otherIdStr = msg.peers[0];
-      targetPeerId = otherIdStr;
-      await startConnection();
+    targetPeerId = otherIdStr;
+    await startConnection();
   }
 
   if ('offer' === msg.type) {
@@ -107,7 +113,7 @@ function createPeerConnection() {
   pc.onconnectionstatechange = () => {
     console.log('Connection state:', pc.connectionState);
 
-    if (pc.iceConnectionState === 'connected' && !signalingClosed) {
+    if (pc.connectionState === 'connected' && !signalingClosed) {
       signalingClosed = true;
       console.log('P2P connected, closing signaling');
       socket.close();
@@ -122,13 +128,29 @@ function setupChannel(ch) {
 
   ch.onopen = () => {
     console.log('DataChannel open');
-
-    const buf = Buffer.from(peerId, 'hex');
-    ch.send(buf);
+    console.log('PINGING', targetPeerId);
+    ch.send(encodePing(peerId));
   };
 
   ch.onmessage = (e) => {
-    const data = Buffer.from(e.data);
-    console.log('Received peer ID:', data.toString('hex'));
+    const buf = Buffer.from(e.data);
+    const { type, nodeId } = decodeMessage(buf);
+    const nodeIdHex = nodeId.toString('hex');
+
+    switch (type) {
+      case MSG_PING:
+        if (nodeId.equals(peerId)) return;
+        console.log('PING from', nodeIdHex);
+        ch.send(encodePong(peerId));
+        break;
+
+      case MSG_PONG:
+        if (nodeId.equals(peerId)) return;
+        console.log('PONG from', nodeIdHex);
+        break;
+
+      default:
+        console.warn('Unknown message type:', type);
+    }
   };
 }
