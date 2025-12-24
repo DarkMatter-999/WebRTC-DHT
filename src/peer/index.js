@@ -19,6 +19,7 @@ let pc;
 let channel;
 let targetPeerId = null;
 let signalingClosed = false;
+let isBootstrap = false;
 
 socket.on('open', () => {
   console.log('Connected to signaling');
@@ -30,10 +31,17 @@ socket.on('open', () => {
 socket.on('message', async (data) => {
   const msg = JSON.parse(data);
 
-  if ('peers' === msg.type && msg?.peers?.length && !pc) {
-    const otherIdStr = msg.peers[0];
-    targetPeerId = otherIdStr;
-    await startConnection();
+  if ('peers' === msg.type) {
+    if (msg.peers.length === 0) {
+      console.log('No peers found, acting as bootstrap');
+      isBootstrap = true;
+      return;
+    }
+
+    if (!pc) {
+      targetPeerId = msg.peers[0];
+      await startConnection();
+    }
   }
 
   if ('offer' === msg.type) {
@@ -113,7 +121,11 @@ function createPeerConnection() {
   pc.onconnectionstatechange = () => {
     console.log('Connection state:', pc.connectionState);
 
-    if (pc.connectionState === 'connected' && !signalingClosed) {
+    if (
+      pc.connectionState === 'connected' &&
+      !signalingClosed &&
+      !isBootstrap
+    ) {
       signalingClosed = true;
       console.log('P2P connected, closing signaling');
       socket.close();
