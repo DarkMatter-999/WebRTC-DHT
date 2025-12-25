@@ -9,6 +9,7 @@
   "scripts": {
     "signalling": "node src/signalling",
     "peer": "node src/peer",
+    "client": "node src/peer/client.js",
     "lint": "eslint . --ext .js",
     "format": "prettier --write .",
     "prepare": "husky install"
