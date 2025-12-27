@@ -37,6 +37,10 @@ rl.on('line', (line) => {
       node.findNode(Buffer.from(arg, 'hex'));
       break;
 
+    case 'connect':
+      node.connect(arg);
+      break;
+
     default:
       console.log(
         'Unknown command. Available commands: peers | ping <peerId> | find <nodeId> | connect <peerId>'

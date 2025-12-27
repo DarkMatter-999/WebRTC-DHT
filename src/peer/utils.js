@@ -21,13 +21,11 @@ export function encodePong(nodeId) {
 }
 
 export function decodeMessage(buf) {
-  if (buf.length < 1 + NODE_ID_LEN) {
-    throw new Error('Malformed message');
-  }
+  if (buf.length < 1) throw new Error('Malformed message');
 
   return {
     type: buf[0],
-    nodeId: buf.subarray(1, 1 + NODE_ID_LEN),
+    content: buf.subarray(1),
   };
 }
 
@@ -73,4 +71,18 @@ export function decodeFindNodeResponse(buf) {
     nodeIds.push(buf.subarray(2 + i * NODE_ID_LEN, 2 + (i + 1) * NODE_ID_LEN));
   }
   return nodeIds;
+}
+
+export function encodeSignal(type, payload) {
+  const payloadBuf = Buffer.from(JSON.stringify(payload), 'utf8');
+  const buf = Buffer.alloc(1 + payloadBuf.length);
+  buf[0] = type;
+  payloadBuf.copy(buf, 1);
+  return buf;
+}
+
+export function decodeSignal(buf) {
+  const type = buf[0];
+  const payload = JSON.parse(buf.subarray(1).toString());
+  return { type, payload };
 }

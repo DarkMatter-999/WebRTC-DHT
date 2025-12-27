@@ -12,13 +12,19 @@ import {
   decodeFindNodeResponse,
   xorDistance,
   compareDistance,
+  encodeSignal,
+  decodeSignal,
 } from './utils.js';
 
 import {
+  NODE_ID_LEN,
   MSG_PING,
   MSG_PONG,
   MSG_FIND_NODE,
   MSG_FIND_NODE_RESPONSE,
+  MSG_SIGNAL_OFFER,
+  MSG_SIGNAL_ANSWER,
+  MSG_SIGNAL_ICE,
 } from './constants.js';
 
 export class PeerNode {
@@ -101,6 +107,19 @@ export class PeerNode {
     }
   }
 
+  sendSignal(targetPeerId, type, payload, ttl = 7) {
+    const peer = this.knownPeers.get(targetPeerId);
+    if (peer && peer.channel && peer.channel.readyState === 'open') {
+      peer.channel.send(encodeSignal(type, payload));
+    } else if (ttl > 0) {
+      for (const [peerIdHex, { channel }] of this.knownPeers.entries()) {
+        if (channel.readyState === 'open' && peerIdHex !== payload.from) {
+          channel.send(encodeSignal(type, payload));
+        }
+      }
+    }
+  }
+
   createPeerConnection(targetPeerId) {
     const pc = new wrtc.RTCPeerConnection({
       iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
@@ -108,14 +127,25 @@ export class PeerNode {
 
     pc.onicecandidate = (e) => {
       if (e.candidate) {
-        this.socket.send(
-          JSON.stringify({
-            type: 'ice',
+        if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+          this.socket.send(
+            JSON.stringify({
+              type: 'ice',
+              from: this.peerIdHex,
+              to: targetPeerId,
+              candidate: e.candidate,
+            })
+          );
+        } else {
+          const signalPayload = {
+            payload: e.candidate,
             from: this.peerIdHex,
             to: targetPeerId,
-            candidate: e.candidate,
-          })
-        );
+            ttl: 7,
+          };
+
+          this.sendSignal(targetPeerId, MSG_SIGNAL_ICE, signalPayload);
+        }
       }
     };
 
@@ -156,11 +186,14 @@ export class PeerNode {
   async acceptOffer(offer, fromPeerId) {
     const pc = this.createPeerConnection(fromPeerId);
 
+    this.peers.set(fromPeerId, { pc, channel: null });
+
     pc.ondatachannel = (e) => {
       const channel = e.channel;
-      this.setupChannel(channel, fromPeerId);
-      const peer = this.peers.get(fromPeerId);
-      peer.channel = channel;
+      if (!this.peers.get(fromPeerId).channel) {
+        this.peers.get(fromPeerId).channel = channel;
+        this.setupChannel(channel, fromPeerId);
+      }
     };
 
     await pc.setRemoteDescription(offer);
@@ -168,16 +201,25 @@ export class PeerNode {
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
 
-    this.peers.set(fromPeerId, { pc, channel: null });
-
-    this.socket.send(
-      JSON.stringify({
-        type: 'answer',
+    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+      this.socket.send(
+        JSON.stringify({
+          type: 'answer',
+          from: this.peerIdHex,
+          to: fromPeerId,
+          sdp: answer,
+        })
+      );
+    } else {
+      const signalPayload = {
+        payload: answer,
         from: this.peerIdHex,
         to: fromPeerId,
-        sdp: answer,
-      })
-    );
+        ttl: 7,
+      };
+
+      this.sendSignal(fromPeerId, MSG_SIGNAL_ANSWER, signalPayload);
+    }
   }
 
   setupChannel(channel, peerIdHex) {
@@ -191,25 +233,30 @@ export class PeerNode {
     channel.onmessage = (e) => this.handleMessage(Buffer.from(e.data), channel);
   }
 
-  handleMessage(buf, ch) {
-    const { type, nodeId } = decodeMessage(buf);
-    const nodeIdHex = nodeId.toString('hex');
+  async handleMessage(buf, ch) {
+    const { type, content } = decodeMessage(buf);
 
     switch (type) {
-      case MSG_PING:
+      case MSG_PING: {
+        const nodeId = content.subarray(0, NODE_ID_LEN);
+        const nodeIdHex = nodeId.toString('hex');
         if (!nodeId.equals(this.peerId)) {
           this.knownPeers.set(nodeIdHex, { nodeId, channel: ch });
           console.log('PING from', nodeIdHex);
           ch.send(encodePong(this.peerId));
         }
         break;
+      }
 
-      case MSG_PONG:
+      case MSG_PONG: {
+        const nodeId = content.subarray(0, NODE_ID_LEN);
+        const nodeIdHex = nodeId.toString('hex');
         if (!nodeId.equals(this.peerId)) {
           this.knownPeers.set(nodeIdHex, { nodeId, channel: ch });
           console.log('PONG from', nodeIdHex);
         }
         break;
+      }
 
       case MSG_FIND_NODE: {
         const targetNodeId = decodeFindNode(buf);
@@ -237,18 +284,102 @@ export class PeerNode {
         this.onFindNodeResponse?.(nodes);
         break;
       }
+
+      case MSG_SIGNAL_OFFER: {
+        const { payload } = decodeSignal(buf);
+        if (payload.to === this.peerIdHex) {
+          if (!this.peers.has(payload.from)) {
+            await this.acceptOffer(payload.payload, payload.from);
+          }
+        } else {
+          payload.ttl = (payload.ttl || 7) - 1;
+          this.sendSignal(payload.to, MSG_SIGNAL_OFFER, payload);
+        }
+        break;
+      }
+
+      case MSG_SIGNAL_ANSWER: {
+        const { payload } = decodeSignal(buf);
+        if (payload.to === this.peerIdHex) {
+          const peer = this.peers.get(payload.from);
+          if (peer && peer.pc.signalingState !== 'stable') {
+            await peer.pc.setRemoteDescription(payload.payload);
+          }
+        } else {
+          payload.ttl = (payload.ttl || 7) - 1;
+          this.sendSignal(payload.to, MSG_SIGNAL_ANSWER, payload);
+        }
+        break;
+      }
+
+      case MSG_SIGNAL_ICE: {
+        const { payload } = decodeSignal(buf);
+        if (payload.to === this.peerIdHex) {
+          const peer = this.peers.get(payload.from);
+          if (peer) await peer.pc.addIceCandidate(payload.payload);
+        } else {
+          payload.ttl = (payload.ttl || 7) - 1;
+          this.sendSignal(payload.to, MSG_SIGNAL_ICE, payload);
+        }
+        break;
+      }
+
+      default:
+        console.log('Unknown message type:', type);
     }
   }
 
   ping(peerIdHex) {
     const peer = this.knownPeers.get(peerIdHex);
-    if (peer) peer.channel.send(encodePing(this.peerId));
+    if (peer && peer.channel && peer.channel.readyState === 'open') {
+      peer.channel.send(encodePing(this.peerId));
+    }
   }
 
   findNode(targetNodeId) {
     for (const peer of this.knownPeers.values()) {
-      peer.channel.send(encodeFindNode(targetNodeId));
+      if (peer.channel && peer.channel.readyState === 'open') {
+        peer.channel.send(encodeFindNode(targetNodeId));
+      }
     }
+  }
+
+  async connect(targetPeerId) {
+    if (this.peers.has(targetPeerId)) {
+      console.log('Already connected to', targetPeerId);
+      return;
+    }
+
+    const pc = this.createPeerConnection(targetPeerId);
+    const channel = pc.createDataChannel('dht');
+    this.setupChannel(channel, targetPeerId);
+
+    this.peers.set(targetPeerId, { pc, channel });
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+      this.socket.send(
+        JSON.stringify({
+          type: 'offer',
+          from: this.peerIdHex,
+          to: targetPeerId,
+          sdp: offer,
+        })
+      );
+    } else {
+      const signalPayload = {
+        payload: offer,
+        from: this.peerIdHex,
+        to: targetPeerId,
+        ttl: 7,
+      };
+
+      this.sendSignal(targetPeerId, MSG_SIGNAL_OFFER, signalPayload);
+    }
+
+    console.log('Sent offer to', targetPeerId);
   }
 
   getPeers() {
