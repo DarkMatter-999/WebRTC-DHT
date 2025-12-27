@@ -24,15 +24,22 @@ const rl = readline.createInterface({
 rl.on('line', (line) => {
   const [cmd, arg] = line.trim().split(' ');
 
-  if (cmd === 'peers') {
-    console.log(node.getPeers());
-  }
+  switch (cmd) {
+    case 'peers':
+      console.log(node.getPeers());
+      break;
 
-  if (cmd === 'ping') {
-    node.ping(arg);
-  }
+    case 'ping':
+      node.ping(arg);
+      break;
 
-  if (cmd === 'find') {
-    node.findNode(Buffer.from(arg, 'hex'));
+    case 'find':
+      node.findNode(Buffer.from(arg, 'hex'));
+      break;
+
+    default:
+      console.log(
+        'Unknown command. Available commands: peers | ping <peerId> | find <nodeId> | connect <peerId>'
+      );
   }
 });

@@ -29,14 +29,11 @@ export class PeerNode {
     this.peerIdHex = this.peerId.toString('hex');
 
     this.socket = null;
-    this.pc = null;
-    this.channel = null;
-    this.targetPeerId = null;
+    this.peers = new Map();
+    this.knownPeers = new Map();
 
     this.isBootstrap = false;
     this.signalingClosed = false;
-
-    this.knownPeers = new Map();
 
     this.onFindNodeResponse = null;
     this.onPeerConnected = null;
@@ -66,27 +63,45 @@ export class PeerNode {
         return;
       }
 
-      if (!this.pc) {
-        this.targetPeerId = msg.peers[0];
-        await this.startConnection();
+      const peersWithDistance = msg.peers.map((peerIdHex) => {
+        const nodeId = Buffer.from(peerIdHex, 'hex');
+        const distance = xorDistance(this.peerId, nodeId);
+        return { peerIdHex, distance };
+      });
+
+      peersWithDistance.sort((a, b) => compareDistance(a.distance, b.distance));
+
+      // Connect to top-k closest peers (k=3)
+      const topK = peersWithDistance.slice(0, 3);
+      for (const peer of topK) {
+        if (!this.peers.has(peer.peerIdHex)) {
+          await this.startConnection(peer.peerIdHex);
+        }
       }
     }
 
     if (msg.type === 'offer') {
-      this.targetPeerId = msg.from;
-      await this.acceptOffer(msg.sdp);
+      if (!this.peers.has(msg.from)) {
+        await this.acceptOffer(msg.sdp, msg.from);
+      }
     }
 
     if (msg.type === 'answer') {
-      await this.pc.setRemoteDescription(msg.sdp);
+      const peer = this.peers.get(msg.from);
+      if (peer && peer.pc) {
+        await peer.pc.setRemoteDescription(msg.sdp);
+      }
     }
 
     if (msg.type === 'ice') {
-      await this.pc.addIceCandidate(msg.candidate);
+      const peer = this.peers.get(msg.from);
+      if (peer && peer.pc) {
+        await peer.pc.addIceCandidate(msg.candidate);
+      }
     }
   }
 
-  createPeerConnection() {
+  createPeerConnection(targetPeerId) {
     const pc = new wrtc.RTCPeerConnection({
       iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
     });
@@ -97,7 +112,7 @@ export class PeerNode {
           JSON.stringify({
             type: 'ice',
             from: this.peerIdHex,
-            to: this.targetPeerId,
+            to: targetPeerId,
             candidate: e.candidate,
           })
         );
@@ -106,7 +121,7 @@ export class PeerNode {
 
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === 'connected') {
-        this.onPeerConnected?.(this.targetPeerId);
+        this.onPeerConnected?.(targetPeerId);
 
         if (!this.signalingClosed && !this.isBootstrap) {
           this.signalingClosed = true;
@@ -118,57 +133,62 @@ export class PeerNode {
     return pc;
   }
 
-  async startConnection() {
-    this.pc = this.createPeerConnection();
+  async startConnection(targetPeerId) {
+    const pc = this.createPeerConnection(targetPeerId);
+    const channel = pc.createDataChannel('dht');
+    this.setupChannel(channel, targetPeerId);
 
-    this.channel = this.pc.createDataChannel('dht');
-    this.setupChannel(this.channel);
+    this.peers.set(targetPeerId, { pc, channel });
 
-    const offer = await this.pc.createOffer();
-    await this.pc.setLocalDescription(offer);
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
 
     this.socket.send(
       JSON.stringify({
         type: 'offer',
         from: this.peerIdHex,
-        to: this.targetPeerId,
+        to: targetPeerId,
         sdp: offer,
       })
     );
   }
 
-  async acceptOffer(offer) {
-    this.pc = this.createPeerConnection();
+  async acceptOffer(offer, fromPeerId) {
+    const pc = this.createPeerConnection(fromPeerId);
 
-    this.pc.ondatachannel = (e) => {
-      this.channel = e.channel;
-      this.setupChannel(this.channel);
+    pc.ondatachannel = (e) => {
+      const channel = e.channel;
+      this.setupChannel(channel, fromPeerId);
+      const peer = this.peers.get(fromPeerId);
+      peer.channel = channel;
     };
 
-    await this.pc.setRemoteDescription(offer);
+    await pc.setRemoteDescription(offer);
 
-    const answer = await this.pc.createAnswer();
-    await this.pc.setLocalDescription(answer);
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+
+    this.peers.set(fromPeerId, { pc, channel: null });
 
     this.socket.send(
       JSON.stringify({
         type: 'answer',
         from: this.peerIdHex,
-        to: this.targetPeerId,
+        to: fromPeerId,
         sdp: answer,
       })
     );
   }
 
-  setupChannel(ch) {
-    ch.binaryType = 'arraybuffer';
+  setupChannel(channel, peerIdHex) {
+    channel.binaryType = 'arraybuffer';
 
-    ch.onopen = () => {
-      console.log('DataChannel open');
-      ch.send(encodePing(this.peerId));
+    channel.onopen = () => {
+      console.log('DataChannel open with', peerIdHex);
+      channel.send(encodePing(this.peerId));
     };
 
-    ch.onmessage = (e) => this.handleMessage(Buffer.from(e.data), ch);
+    channel.onmessage = (e) => this.handleMessage(Buffer.from(e.data), channel);
   }
 
   handleMessage(buf, ch) {
