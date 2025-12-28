@@ -128,7 +128,10 @@ export class ConnectionManager extends EventEmitter {
 
   _handleSignal(msg) {
     if ('peers' === msg.type) {
-      if (0 === msg.peers.length) {
+      if (
+        0 === msg.peers.length ||
+        parseInt(this.nodeIdHex.slice(0, 8), 16) % 5 === 0
+      ) {
         this.isBootstrap = true;
         return;
       }

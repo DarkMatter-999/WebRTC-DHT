@@ -1,5 +1,6 @@
 import { WebSocketServer } from 'ws';
 import 'dotenv/config';
+import { xorDistance, compareDistance } from '../peer/utils.js';
 
 const wss = new WebSocketServer({
   port: Number(process.env.SIGNALLING_PORT),
@@ -33,10 +34,26 @@ wss.on('connection', function connection(ws) {
         break;
 
       case 'get-peers':
+        const peerIds = Array.from(peers.keys()).filter((id) => id !== peerId);
+
+        const peersWithDistance = peerIds.map((id) => {
+          const distance = xorDistance(
+            Buffer.from(peerId, 'hex'),
+            Buffer.from(id, 'hex')
+          );
+          return { id, distance };
+        });
+
+        peersWithDistance.sort((a, b) =>
+          compareDistance(a.distance, b.distance)
+        );
+
+        const closestPeers = peersWithDistance.slice(0, 5).map((p) => p.id);
+
         ws.send(
           JSON.stringify({
             type: 'peers',
-            peers: [...peers.keys()].filter((id) => id !== peerId),
+            peers: closestPeers,
           })
         );
         break;
