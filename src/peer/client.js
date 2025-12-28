@@ -26,7 +26,7 @@ rl.on('line', (line) => {
 
   switch (cmd) {
     case 'peers':
-      console.log(node.getPeers());
+      console.log(node?.conn?.getConnectedPeers());
       break;
 
     case 'ping':
