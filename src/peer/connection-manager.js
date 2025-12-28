@@ -13,6 +13,8 @@ import {
   MSG_SIGNAL_OFFER,
 } from './constants.js';
 
+const HEARTBEAT_INTERVAL = 60_000;
+
 export class ConnectionManager extends EventEmitter {
   constructor({ nodeId, signalingUrl }) {
     super();
@@ -25,6 +27,7 @@ export class ConnectionManager extends EventEmitter {
 
     this.peers = new Map();
     this.knownPeers = new Map();
+    this.lastSeen = new Map();
 
     this.isBootstrap = false;
     this.signalingClosed = false;
@@ -48,6 +51,11 @@ export class ConnectionManager extends EventEmitter {
     this.socket.on('message', (data) => {
       this._handleSignal(JSON.parse(data));
     });
+
+    this.heartbeatInterval = setInterval(
+      () => this._heartbeat(),
+      HEARTBEAT_INTERVAL
+    );
   }
 
   async connect(peerIdHex) {
@@ -111,6 +119,8 @@ export class ConnectionManager extends EventEmitter {
     };
 
     channel.onmessage = (e) => {
+      this.lastSeen.set(peerIdHex, Date.now());
+
       const buf = Buffer.from(e.data);
       const { type } = decodeMessage(buf);
 
@@ -263,5 +273,40 @@ export class ConnectionManager extends EventEmitter {
         channel.send(buf);
       }
     }
+  }
+
+  _heartbeat() {
+    const now = Date.now();
+
+    for (const [peerId, peer] of this.peers) {
+      const last = this.lastSeen.get(peerId) ?? 0;
+
+      if (now - last > 2 * HEARTBEAT_INTERVAL) {
+        this._dropPeer(peerId);
+        continue;
+      }
+
+      if (peer.channel?.readyState === 'open') {
+        peer.channel.send(encodePing(this.nodeId));
+      }
+    }
+  }
+
+  _dropPeer(peerIdHex) {
+    const peer = this.peers.get(peerIdHex);
+    if (!peer) return;
+
+    try {
+      peer.channel?.close();
+    } catch {}
+    try {
+      peer.pc?.close();
+    } catch {}
+
+    this.peers.delete(peerIdHex);
+    this.knownPeers.delete(peerIdHex);
+    this.lastSeen.delete(peerIdHex);
+
+    this.emit('peerDisconnected', peerIdHex);
   }
 }
