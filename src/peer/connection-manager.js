@@ -194,7 +194,9 @@ export class ConnectionManager extends EventEmitter {
     const peer = this.peers.get(from);
     if (!peer) return;
 
-    await peer.pc.setRemoteDescription(sdp);
+    if (peer.pc.signalingState !== 'stable') {
+      await peer.pc.setRemoteDescription(sdp);
+    }
   }
 
   async _addIceCandidate({ from, candidate }) {
@@ -216,7 +218,7 @@ export class ConnectionManager extends EventEmitter {
     } else {
       this.broadcast(
         encodeSignal(type, {
-          from: this.nodeId,
+          from: this.nodeIdHex,
           to: peerIdHex,
           payload,
           ttl: 7,

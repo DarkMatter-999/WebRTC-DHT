@@ -104,7 +104,7 @@ export class PeerNode {
   }
 
   async connect(targetPeerId) {
-    this.conn.connect(targetPeerId);
+    await this.conn.connect(targetPeerId);
     console.log('Sent offer to', targetPeerId);
   }
 
