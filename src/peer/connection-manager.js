@@ -100,6 +100,11 @@ export class ConnectionManager extends EventEmitter {
   _setupChannel(channel, peerIdHex) {
     channel.binaryType = 'arraybuffer';
 
+    const peer = this.peers.get(peerIdHex);
+    if (peer) {
+      peer.channel = channel;
+    }
+
     channel.onopen = () => {
       this.knownPeers.set(peerIdHex, { channel });
       channel.send(encodePing(this.nodeId));
