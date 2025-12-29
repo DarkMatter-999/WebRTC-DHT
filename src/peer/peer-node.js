@@ -19,6 +19,7 @@ import {
   MSG_FIND_NODE_RESPONSE,
 } from './constants.js';
 import { ConnectionManager } from './connection-manager.js';
+import { RoutingTable } from './routing-table.js';
 
 export class PeerNode {
   constructor({ signalingUrl }) {
@@ -35,9 +36,23 @@ export class PeerNode {
       signalingUrl,
     });
 
+    this.routingTable = new RoutingTable({
+      nodeId: this.peerId,
+      k: 20,
+    });
+
     this.conn.on('message', (peerId, buf) => this.handleMessage(peerId, buf));
 
-    this.conn.on('peerConnected', (peerId) => this.onPeerConnected?.(peerId));
+    this.conn.on('peerConnected', (peerIdHex) => {
+      const nodeId = Buffer.from(peerIdHex, 'hex');
+
+      this.routingTable.addNode(nodeId);
+      this.onPeerConnected?.(peerIdHex);
+    });
+
+    this.conn.on('peerDisconnected', (peerIdHex) => {
+      this.routingTable.removeNode(Buffer.from(peerIdHex, 'hex'));
+    });
   }
 
   start() {
@@ -63,6 +78,7 @@ export class PeerNode {
       case MSG_PONG: {
         const nodeId = content.subarray(0, NODE_ID_LEN);
         const nodeIdHex = nodeId.toString('hex');
+        this.routingTable.touch(nodeId);
 
         if (!nodeId.equals(this.peerId)) {
           console.log('PONG from', nodeIdHex);
@@ -73,7 +89,7 @@ export class PeerNode {
       case MSG_FIND_NODE: {
         const targetNodeId = decodeFindNode(buf);
 
-        const closest = this.getClosestPeers(targetNodeId, 3);
+        const closest = this.routingTable.findClosest(targetNodeId, 3);
         this.conn.send(peerIdHex, encodeFindNodeResponse(closest));
         break;
       }
@@ -106,18 +122,5 @@ export class PeerNode {
   async connect(targetPeerId) {
     await this.conn.connect(targetPeerId);
     console.log('Sent offer to', targetPeerId);
-  }
-
-  getClosestPeers(targetNodeId, k) {
-    return this.conn
-      .getKnownPeerIds()
-      .map((hex) => Buffer.from(hex, 'hex'))
-      .sort((a, b) =>
-        compareDistance(
-          xorDistance(a, targetNodeId),
-          xorDistance(b, targetNodeId)
-        )
-      )
-      .slice(0, k);
   }
 }
