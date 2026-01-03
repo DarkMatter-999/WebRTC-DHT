@@ -1,0 +1,15 @@
+FROM node:22-slim
+
+WORKDIR /opt/app
+
+RUN npm install -g node-pre-gyp
+
+COPY package*.json ./
+RUN npm install
+
+COPY . .
+
+ENV SIGNALLING_PORT=3000
+ENV SIGNALLING_HOST=signalling
+
+CMD ["npm", "run", "client"]

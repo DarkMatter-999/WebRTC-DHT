@@ -1,0 +1,35 @@
+version: '3.9'
+
+services:
+  signalling:
+    build:
+      context: .
+      dockerfile: Dockerfile.signalling
+    container_name: signalling
+    environment:
+      SIGNALLING_PORT: ${SIGNALLING_PORT}
+      SIGNALLING_HOST: ${SIGNALLING_HOST}
+    ports:
+      - '${SIGNALLING_PORT}:${SIGNALLING_PORT}'
+
+  client:
+    build:
+      context: .
+      dockerfile: Dockerfile.client
+    container_name: client
+    environment:
+      SIGNALLING_PORT: ${SIGNALLING_PORT}
+      SIGNALLING_HOST: signalling
+    depends_on:
+      - signalling
+
+  peer:
+    build:
+      context: .
+      dockerfile: Dockerfile.peer
+    container_name: peer
+    environment:
+      SIGNALLING_PORT: ${SIGNALLING_PORT}
+      SIGNALLING_HOST: signalling
+    depends_on:
+      - signalling

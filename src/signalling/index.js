@@ -3,7 +3,8 @@ import 'dotenv/config';
 import { xorDistance, compareDistance } from '../peer/utils.js';
 
 const wss = new WebSocketServer({
-  port: Number(process.env.SIGNALLING_PORT),
+  port: Number(process.env.SIGNALLING_PORT || 3000),
+  host: '0.0.0.0',
 });
 const peers = new Map();
 

@@ -1,7 +1,7 @@
 import readline from 'readline';
 import { PeerNode } from './peer-node.js';
 
-const SIGNAL_URL = `ws://localhost:${process.env.SIGNALLING_PORT || 3000}`;
+const SIGNAL_URL = `ws://${process.env.SIGNALLING_HOST || 'localhost'}:${process.env.SIGNALLING_PORT || 3000}`;
 
 const node = new PeerNode({ signalingUrl: SIGNAL_URL });
 
