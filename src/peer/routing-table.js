@@ -10,26 +10,27 @@ export class RoutingTable {
     );
   }
 
-  addNode(nodeId) {
+  addOrUpdateNode(nodeId) {
+    if (!Buffer.isBuffer(nodeId)) return;
+    if (nodeId.length !== this.nodeId.length) return;
     if (nodeId.equals(this.nodeId)) return;
 
-    const bucketIndex = this._bucketIndex(nodeId);
-    const bucket = this.buckets[bucketIndex];
+    const i = this._bucketIndex(nodeId);
+    const bucket = this.buckets[i];
 
-    const existingIndex = bucket.findIndex((id) => id.equals(nodeId));
-
-    if (existingIndex !== -1) {
-      bucket.splice(existingIndex, 1);
+    const idx = bucket.findIndex((id) => id.equals(nodeId));
+    if (idx !== -1) {
+      bucket.splice(idx, 1);
       bucket.push(nodeId);
-      return;
+      return { action: 'updated' };
     }
 
     if (bucket.length < this.k) {
       bucket.push(nodeId);
-      return;
+      return { action: 'added' };
     }
 
-    // bucket full, ignore for now
+    return { action: 'full', bucketIndex: i };
   }
 
   removeNode(nodeId) {
@@ -43,7 +44,15 @@ export class RoutingTable {
   }
 
   touch(nodeId) {
-    this.addNode(nodeId);
+    return this.addOrUpdateNode(nodeId);
+  }
+
+  getLeastRecentlySeen(bucketIndex) {
+    return this.buckets[bucketIndex][0];
+  }
+
+  evict(bucketIndex) {
+    this.buckets[bucketIndex].shift();
   }
 
   findClosest(targetId, count = this.k) {

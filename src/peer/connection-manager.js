@@ -75,12 +75,16 @@ export class ConnectionManager extends EventEmitter {
 
   send(peerIdHex, buffer) {
     const peer = this.peers.get(peerIdHex);
-    if (peer?.channel?.readyState === 'open') {
+    if ('open' === peer?.channel?.readyState) {
       peer.channel.send(buffer);
     }
   }
 
   _createPeerConnection(peerIdHex) {
+    if (this.peers.has(peerIdHex)) {
+      return this.peers.get(peerIdHex).pc;
+    }
+
     const pc = new wrtc.RTCPeerConnection({
       iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
     });
@@ -93,7 +97,10 @@ export class ConnectionManager extends EventEmitter {
 
     pc.onconnectionstatechange = () => {
       if ('connected' === pc.connectionState) {
-        this.emit('peerConnected', peerIdHex);
+        if (!this.peers.get(peerIdHex)?.connected) {
+          this.peers.get(peerIdHex).connected = true;
+          this.emit('peerConnected', peerIdHex);
+        }
         this._maybeCloseSignaling();
       }
     };
@@ -130,9 +137,10 @@ export class ConnectionManager extends EventEmitter {
         MSG_SIGNAL_ICE === type
       ) {
         this._handleDhtSignal(buf);
-      } else {
-        this.emit('message', peerIdHex, buf);
+        return;
       }
+
+      this.emit('message', peerIdHex, buf);
     };
   }
 
@@ -207,7 +215,7 @@ export class ConnectionManager extends EventEmitter {
     const peer = this.peers.get(from);
     if (!peer) return;
 
-    if (peer.pc.signalingState !== 'stable') {
+    if ('stable' !== peer.pc.signalingState) {
       await peer.pc.setRemoteDescription(sdp);
     }
   }
@@ -286,7 +294,7 @@ export class ConnectionManager extends EventEmitter {
         continue;
       }
 
-      if (peer.channel?.readyState === 'open') {
+      if ('open' === peer.channel?.readyState) {
         peer.channel.send(encodePing(this.nodeId));
       }
     }

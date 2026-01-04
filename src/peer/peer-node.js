@@ -7,8 +7,6 @@ import {
   encodeFindNodeResponse,
   decodeFindNode,
   decodeFindNodeResponse,
-  xorDistance,
-  compareDistance,
 } from './utils.js';
 
 import {
@@ -18,6 +16,7 @@ import {
   MSG_FIND_NODE,
   MSG_FIND_NODE_RESPONSE,
 } from './constants.js';
+
 import { ConnectionManager } from './connection-manager.js';
 import { RoutingTable } from './routing-table.js';
 
@@ -31,6 +30,8 @@ export class PeerNode {
     this.onFindNodeResponse = null;
     this.onPeerConnected = null;
 
+    this.pendingPings = new Map();
+
     this.conn = new ConnectionManager({
       nodeId: this.peerId,
       signalingUrl,
@@ -41,12 +42,13 @@ export class PeerNode {
       k: 20,
     });
 
-    this.conn.on('message', (peerId, buf) => this.handleMessage(peerId, buf));
+    this.conn.on('message', (peerIdHex, buf) =>
+      this.handleMessage(peerIdHex, buf)
+    );
 
     this.conn.on('peerConnected', (peerIdHex) => {
       const nodeId = Buffer.from(peerIdHex, 'hex');
-
-      this.routingTable.addNode(nodeId);
+      this.maybeAddNode(nodeId);
       this.onPeerConnected?.(peerIdHex);
     });
 
@@ -60,6 +62,30 @@ export class PeerNode {
     this.conn.start();
   }
 
+  maybeAddNode(nodeId) {
+    const result = this.routingTable.addOrUpdateNode(nodeId);
+    if (!result || result.action !== 'full') return;
+
+    const bucketIndex = result.bucketIndex;
+    const lru = this.routingTable.getLeastRecentlySeen(bucketIndex);
+    if (!lru) return;
+
+    const lruHex = lru.toString('hex');
+
+    if (!this.conn.getConnectedPeers().includes(lruHex)) {
+      this.routingTable.evict(bucketIndex);
+      this.routingTable.addOrUpdateNode(nodeId);
+      return;
+    }
+
+    this.pingWithTimeout(lruHex).then((alive) => {
+      if (!alive) {
+        this.routingTable.evict(bucketIndex);
+        this.routingTable.addOrUpdateNode(nodeId);
+      }
+    });
+  }
+
   handleMessage(peerIdHex, buf) {
     const { type, content } = decodeMessage(buf);
 
@@ -68,27 +94,39 @@ export class PeerNode {
         const nodeId = content.subarray(0, NODE_ID_LEN);
         const nodeIdHex = nodeId.toString('hex');
 
-        if (!nodeId.equals(this.peerId)) {
-          console.log('PING from', nodeIdHex);
-          this.conn.send(peerIdHex, encodePong(this.peerId));
+        if (nodeIdHex !== peerIdHex) {
+          console.warn('NodeId mismatch, dropping peer', peerIdHex);
+          this.conn._dropPeer(peerIdHex);
+          return;
         }
+
+        this.maybeAddNode(nodeId);
+        this.conn.send(peerIdHex, encodePong(this.peerId));
         break;
       }
 
       case MSG_PONG: {
         const nodeId = content.subarray(0, NODE_ID_LEN);
         const nodeIdHex = nodeId.toString('hex');
-        this.routingTable.touch(nodeId);
 
-        if (!nodeId.equals(this.peerId)) {
-          console.log('PONG from', nodeIdHex);
+        if (nodeIdHex !== peerIdHex) {
+          console.warn('NodeId mismatch, dropping peer', peerIdHex);
+          this.conn._dropPeer(peerIdHex);
+          return;
+        }
+
+        this.maybeAddNode(nodeId);
+
+        const cb = this.pendingPings.get(peerIdHex);
+        if (cb) {
+          this.pendingPings.delete(peerIdHex);
+          cb();
         }
         break;
       }
 
       case MSG_FIND_NODE: {
         const targetNodeId = decodeFindNode(buf);
-
         const closest = this.routingTable.findClosest(targetNodeId, 3);
         this.conn.send(peerIdHex, encodeFindNodeResponse(closest));
         break;
@@ -96,16 +134,24 @@ export class PeerNode {
 
       case MSG_FIND_NODE_RESPONSE: {
         const nodes = decodeFindNodeResponse(buf);
-        console.log(
-          'FIND_NODE response:',
-          nodes.map((id) => id.toString('hex'))
+
+        const clean = nodes.filter(
+          (n) =>
+            Buffer.isBuffer(n) &&
+            n.length === this.peerId.length &&
+            !n.equals(this.peerId)
         );
-        this.onFindNodeResponse?.(nodes);
+
+        for (const nodeId of clean) {
+          this.maybeAddNode(nodeId);
+        }
+
+        this.onFindNodeResponse?.(clean);
         break;
       }
 
       default:
-        console.log('Unknown message type:', type);
+        console.warn('Unknown message type:', type);
     }
   }
 
@@ -113,14 +159,33 @@ export class PeerNode {
     this.conn.send(peerIdHex, encodePing(this.peerId));
   }
 
+  pingWithTimeout(peerIdHex, timeout = 3000) {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.pendingPings.delete(peerIdHex);
+        resolve(false);
+      }, timeout);
+
+      this.pendingPings.set(peerIdHex, () => {
+        clearTimeout(timer);
+        resolve(true);
+      });
+
+      this.ping(peerIdHex);
+    });
+  }
+
   findNode(targetNodeId) {
-    for (const peerId of this.conn.getConnectedPeers()) {
-      this.conn.send(peerId, encodeFindNode(targetNodeId));
+    for (const peerIdHex of this.conn.getConnectedPeers()) {
+      this.conn.send(peerIdHex, encodeFindNode(targetNodeId));
     }
   }
 
-  async connect(targetPeerId) {
-    await this.conn.connect(targetPeerId);
-    console.log('Sent offer to', targetPeerId);
+  async connect(targetPeerIdHex) {
+    if (this.nodeIdHex > targetPeerIdHex) {
+      return;
+    }
+    await this.conn.connect(targetPeerIdHex);
+    console.log('Sent offer to', targetPeerIdHex);
   }
 }
