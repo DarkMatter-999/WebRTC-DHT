@@ -1,5 +1,10 @@
 FROM node:22-slim
 
+LABEL org.opencontainers.image.authors="DarkMatter999"
+LABEL org.opencontainers.image.title="DHT Interactive Client"
+LABEL org.opencontainers.image.description="DHT WebRTC Interactive Client"
+LABEL org.opencontainers.image.vendor="DarkMatter999"
+
 WORKDIR /opt/app
 
 RUN npm install -g node-pre-gyp

@@ -1,4 +1,5 @@
-version: '3.9'
+x-author-labels: &author-labels
+  org.opencontainers.image.authors: 'DarkMatter999'
 
 services:
   signalling:
@@ -11,6 +12,7 @@ services:
       SIGNALLING_HOST: ${SIGNALLING_HOST}
     ports:
       - '${SIGNALLING_PORT}:${SIGNALLING_PORT}'
+    labels: *author-labels
 
   client:
     build:
@@ -22,14 +24,15 @@ services:
       SIGNALLING_HOST: signalling
     depends_on:
       - signalling
+    labels: *author-labels
 
   peer:
     build:
       context: .
       dockerfile: Dockerfile.peer
-    container_name: peer
     environment:
       SIGNALLING_PORT: ${SIGNALLING_PORT}
       SIGNALLING_HOST: signalling
     depends_on:
       - signalling
+    labels: *author-labels
