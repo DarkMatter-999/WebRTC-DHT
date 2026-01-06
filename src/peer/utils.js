@@ -16,6 +16,10 @@ export function generateMessageId() {
   return crypto.randomBytes(8);
 }
 
+export function randomNodeId() {
+  return crypto.randomBytes(32);
+}
+
 export function encodePing(nodeId) {
   return Buffer.concat([Buffer.from([MSG_PING]), Buffer.from(nodeId)]);
 }

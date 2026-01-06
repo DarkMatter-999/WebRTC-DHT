@@ -6,7 +6,11 @@ export class RoutingTable {
     this.k = k;
     this.buckets = Array.from(
       { length: nodeId.length * 8 }, // 256 buckets for SHA-256
-      () => []
+      () => ({
+        nodes: [],
+        replacements: [],
+        lastUsed: Date.now(),
+      })
     );
   }
 
@@ -16,20 +20,23 @@ export class RoutingTable {
     if (nodeId.equals(this.nodeId)) return;
 
     const i = this._bucketIndex(nodeId);
-    const bucket = this.buckets[i];
 
-    const idx = bucket.findIndex((id) => id.equals(nodeId));
+    const bucket = this.buckets[i];
+    bucket.lastUsed = Date.now();
+
+    const idx = bucket.nodes.findIndex((id) => id.equals(nodeId));
     if (idx !== -1) {
-      bucket.splice(idx, 1);
-      bucket.push(nodeId);
+      bucket.nodes.splice(idx, 1);
+      bucket.nodes.push(nodeId);
       return { action: 'updated' };
     }
 
-    if (bucket.length < this.k) {
-      bucket.push(nodeId);
+    if (bucket.nodes.length < this.k) {
+      bucket.nodes.push(nodeId);
       return { action: 'added' };
     }
 
+    bucket.replacements.push(nodeId);
     return { action: 'full', bucketIndex: i };
   }
 
@@ -37,9 +44,9 @@ export class RoutingTable {
     const bucketIndex = this._bucketIndex(nodeId);
     const bucket = this.buckets[bucketIndex];
 
-    const idx = bucket.findIndex((id) => id.equals(nodeId));
+    const idx = bucket.nodes.findIndex((id) => id.equals(nodeId));
     if (idx !== -1) {
-      bucket.splice(idx, 1);
+      bucket.nodes.splice(idx, 1);
     }
   }
 
@@ -48,18 +55,18 @@ export class RoutingTable {
   }
 
   getLeastRecentlySeen(bucketIndex) {
-    return this.buckets[bucketIndex][0];
+    return this.buckets[bucketIndex].nodes[0];
   }
 
   evict(bucketIndex) {
-    this.buckets[bucketIndex].shift();
+    this.buckets[bucketIndex].nodes.shift();
   }
 
   findClosest(targetId, count = this.k) {
     const allNodes = [];
 
     for (const bucket of this.buckets) {
-      for (const id of bucket) {
+      for (const id of bucket.nodes) {
         allNodes.push(id);
       }
     }
@@ -68,19 +75,25 @@ export class RoutingTable {
       compareDistance(xorDistance(a, targetId), xorDistance(b, targetId))
     );
 
+    for (const bucket of this.buckets) {
+      if (bucket.nodes.length > 0) {
+        bucket.lastUsed = Date.now();
+      }
+    }
+
     return allNodes.slice(0, count);
   }
 
   size() {
-    return this.buckets.reduce((sum, b) => sum + b.length, 0);
+    return this.buckets.reduce((sum, b) => sum + b.nodes.length, 0);
   }
 
   dump() {
     return this.buckets
       .map((bucket, i) => ({
         index: i,
-        size: bucket.length,
-        nodes: bucket.map((n) => n.toString('hex')),
+        size: bucket.nodes.length,
+        nodes: bucket.nodes.map((n) => n.toString('hex')),
       }))
       .filter((b) => b.size > 0);
   }
@@ -100,5 +113,13 @@ export class RoutingTable {
 
     // identical IDs (should never happen ig)
     return this.buckets.length - 1;
+  }
+
+  promoteReplacement(bucketIndex) {
+    const bucket = this.buckets[bucketIndex];
+    const replacement = bucket.replacements.shift();
+    if (replacement) {
+      bucket.nodes.push(replacement);
+    }
   }
 }

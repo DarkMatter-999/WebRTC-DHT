@@ -10,6 +10,7 @@ import {
   generateMessageId,
   compareDistance,
   xorDistance,
+  randomNodeId,
 } from './utils.js';
 
 import {
@@ -23,6 +24,9 @@ import {
 import { ConnectionManager } from './connection-manager.js';
 import { RoutingTable } from './routing-table.js';
 
+const REFRESH_INTERVAL = 15 * 60 * 1000; // 15 minutes
+const CLEANUP_INTERVAL = 1 * 60 * 1000; // 1 minutes
+
 export class PeerNode {
   constructor({ signalingUrl }) {
     this.signalingUrl = signalingUrl;
@@ -35,6 +39,7 @@ export class PeerNode {
 
     this.pendingPings = new Map();
     this.pendingRequests = new Map();
+    this.seenRequests = new Map();
     this.ALPHA = 3;
     this.K = 20;
     this.MAX_DIALS = 4;
@@ -68,6 +73,26 @@ export class PeerNode {
   start() {
     console.log('Connecting to signalling server at', this.signalingUrl);
     this.conn.start();
+
+    this._bucketRefreshTimer = setInterval(() => {
+      const now = Date.now();
+
+      this.routingTable.buckets.forEach((bucket) => {
+        if (now - bucket.lastUsed > REFRESH_INTERVAL) {
+          const target = Buffer.from(this.peerId);
+          const bit = Math.floor(Math.random() * target.length * 8);
+          target[Math.floor(bit / 8)] ^= 1 << (7 - (bit % 8));
+          this.iterativeFindNode(target);
+        }
+      });
+    }, REFRESH_INTERVAL);
+
+    setInterval(() => {
+      const now = Date.now();
+      for (const [k, ts] of this.seenRequests) {
+        if (now - ts > CLEANUP_INTERVAL) this.seenRequests.delete(k);
+      }
+    }, CLEANUP_INTERVAL);
   }
 
   maybeAddNode(nodeId) {
@@ -82,6 +107,7 @@ export class PeerNode {
 
     if (!this.conn.getConnectedPeers().includes(lruHex)) {
       this.routingTable.evict(bucketIndex);
+      this.routingTable.promoteReplacement(bucketIndex);
       this.routingTable.addOrUpdateNode(nodeId);
       return;
     }
@@ -89,6 +115,7 @@ export class PeerNode {
     this.pingWithTimeout(lruHex).then((alive) => {
       if (!alive) {
         this.routingTable.evict(bucketIndex);
+        this.routingTable.promoteReplacement(bucketIndex);
         this.routingTable.addOrUpdateNode(nodeId);
       }
     });
@@ -135,7 +162,12 @@ export class PeerNode {
 
       case MSG_FIND_NODE: {
         const { messageId, targetNodeId } = decodeFindNode(buf);
-        const closest = this.routingTable.findClosest(targetNodeId, 3);
+        const key = peerIdHex + ':' + messageId.toString('hex');
+
+        if (this.seenRequests.has(key)) return;
+        this.seenRequests.set(key, Date.now());
+
+        const closest = this.routingTable.findClosest(targetNodeId, this.K);
 
         this.conn.send(peerIdHex, encodeFindNodeResponse(messageId, closest));
         break;
@@ -145,9 +177,12 @@ export class PeerNode {
         const { messageId, nodes } = decodeFindNodeResponse(buf);
         const key = messageId.toString('hex');
 
+        const cb = this.pendingRequests.get(key);
+        if (!cb) return;
+
         const clean = [];
 
-        for (const node of nodes) {
+        for (const node of nodes.slice(0, this.K)) {
           if (
             !Buffer.isBuffer(node) ||
             node.length !== this.peerId.length ||
@@ -160,11 +195,8 @@ export class PeerNode {
           this.maybeAddNode(node);
         }
 
-        const cb = this.pendingRequests.get(key);
-        if (cb) {
-          this.pendingRequests.delete(key);
-          cb(clean);
-        }
+        this.pendingRequests.delete(key);
+        cb(clean);
         break;
       }
 
@@ -255,6 +287,12 @@ export class PeerNode {
       shortlist = shortlist.slice(0, this.K);
 
       if (0 === shortlist.length) break;
+
+      const unqueried = shortlist.filter(
+        (n) => !queried.has(n.toString('hex'))
+      );
+
+      if (unqueried.length === 0) break;
 
       const newClosest = xorDistance(shortlist[0], targetNodeId).toString(
         'hex'
