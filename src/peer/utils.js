@@ -12,6 +12,10 @@ export function createNodeId() {
   return crypto.createHash('sha256').update(crypto.randomBytes(32)).digest();
 }
 
+export function generateMessageId() {
+  return crypto.randomBytes(8);
+}
+
 export function encodePing(nodeId) {
   return Buffer.concat([Buffer.from([MSG_PING]), Buffer.from(nodeId)]);
 }
@@ -44,33 +48,52 @@ export function compareDistance(a, b) {
   return 0;
 }
 
-export function encodeFindNode(targetNodeId) {
-  const buf = Buffer.alloc(1 + targetNodeId.length);
+export function encodeFindNode(messageId, targetNodeId) {
+  if (messageId.length !== 8) {
+    throw new Error('messageId must be 8 bytes');
+  }
+
+  const buf = Buffer.alloc(1 + 8 + NODE_ID_LEN);
   buf[0] = MSG_FIND_NODE;
-  targetNodeId.copy(buf, 1);
+  messageId.copy(buf, 1);
+  targetNodeId.copy(buf, 9);
   return buf;
 }
 
-export function encodeFindNodeResponse(nodeIds) {
-  const buf = Buffer.alloc(1 + 1 + nodeIds.length * nodeIds[0].length);
+export function encodeFindNodeResponse(messageId, nodeIds) {
+  if (messageId.length !== 8) {
+    throw new Error('messageId must be 8 bytes');
+  }
+
+  const count = nodeIds.length;
+  const buf = Buffer.alloc(1 + 8 + 1 + count * NODE_ID_LEN);
+
   buf[0] = MSG_FIND_NODE_RESPONSE;
-  buf[1] = nodeIds.length;
-  nodeIds.forEach((id, idx) => id.copy(buf, 2 + idx * id.length));
+  messageId.copy(buf, 1);
+  buf[9] = count;
+
+  nodeIds.forEach((id, i) => {
+    id.copy(buf, 10 + i * NODE_ID_LEN);
+  });
+
   return buf;
 }
 
 export function decodeFindNode(buf) {
-  const targetNodeId = buf.subarray(1, 1 + NODE_ID_LEN);
-  return targetNodeId;
+  const messageId = buf.subarray(1, 9);
+  const targetNodeId = buf.subarray(9, 9 + NODE_ID_LEN);
+  return { messageId, targetNodeId };
 }
 
 export function decodeFindNodeResponse(buf) {
-  const count = buf[1];
-  const nodeIds = [];
+  const messageId = buf.subarray(1, 9);
+  const count = buf[9];
+
+  const nodes = [];
   for (let i = 0; i < count; i++) {
-    nodeIds.push(buf.subarray(2 + i * NODE_ID_LEN, 2 + (i + 1) * NODE_ID_LEN));
+    nodes.push(buf.subarray(10 + i * NODE_ID_LEN, 10 + (i + 1) * NODE_ID_LEN));
   }
-  return nodeIds;
+  return { messageId, nodes };
 }
 
 export function encodeSignal(type, payload) {

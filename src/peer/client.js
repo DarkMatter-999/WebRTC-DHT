@@ -66,7 +66,7 @@ rl.on('line', (line) => {
         console.log('Usage: find <64-hex-node-id>');
         break;
       }
-      node.findNode(Buffer.from(arg, 'hex'));
+      node.iterativeFindNode(Buffer.from(arg, 'hex'));
       break;
 
     case 'connect':

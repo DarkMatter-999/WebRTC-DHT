@@ -7,6 +7,9 @@ import {
   encodeFindNodeResponse,
   decodeFindNode,
   decodeFindNodeResponse,
+  generateMessageId,
+  compareDistance,
+  xorDistance,
 } from './utils.js';
 
 import {
@@ -31,6 +34,11 @@ export class PeerNode {
     this.onPeerConnected = null;
 
     this.pendingPings = new Map();
+    this.pendingRequests = new Map();
+    this.ALPHA = 3;
+    this.K = 20;
+    this.MAX_DIALS = 4;
+    this.inflightDials = new Set();
 
     this.conn = new ConnectionManager({
       nodeId: this.peerId,
@@ -126,27 +134,37 @@ export class PeerNode {
       }
 
       case MSG_FIND_NODE: {
-        const targetNodeId = decodeFindNode(buf);
+        const { messageId, targetNodeId } = decodeFindNode(buf);
         const closest = this.routingTable.findClosest(targetNodeId, 3);
-        this.conn.send(peerIdHex, encodeFindNodeResponse(closest));
+
+        this.conn.send(peerIdHex, encodeFindNodeResponse(messageId, closest));
         break;
       }
 
       case MSG_FIND_NODE_RESPONSE: {
-        const nodes = decodeFindNodeResponse(buf);
+        const { messageId, nodes } = decodeFindNodeResponse(buf);
+        const key = messageId.toString('hex');
 
-        const clean = nodes.filter(
-          (n) =>
-            Buffer.isBuffer(n) &&
-            n.length === this.peerId.length &&
-            !n.equals(this.peerId)
-        );
+        const clean = [];
 
-        for (const nodeId of clean) {
-          this.maybeAddNode(nodeId);
+        for (const node of nodes) {
+          if (
+            !Buffer.isBuffer(node) ||
+            node.length !== this.peerId.length ||
+            node.equals(this.peerId)
+          ) {
+            continue;
+          }
+
+          clean.push(node);
+          this.maybeAddNode(node);
         }
 
-        this.onFindNodeResponse?.(clean);
+        const cb = this.pendingRequests.get(key);
+        if (cb) {
+          this.pendingRequests.delete(key);
+          cb(clean);
+        }
         break;
       }
 
@@ -175,10 +193,111 @@ export class PeerNode {
     });
   }
 
-  findNode(targetNodeId) {
-    for (const peerIdHex of this.conn.getConnectedPeers()) {
-      this.conn.send(peerIdHex, encodeFindNode(targetNodeId));
+  async iterativeFindNode(targetNodeId) {
+    let shortlist = this.routingTable.findClosest(targetNodeId, this.K);
+    const queried = new Set();
+    let closestDistance = null;
+
+    while (true) {
+      const connected = new Set(this.conn.getConnectedPeers());
+
+      const candidates = [];
+
+      for (const node of shortlist) {
+        const hex = node.toString('hex');
+        if (queried.has(hex)) continue;
+
+        if (connected.has(hex)) {
+          candidates.push(node);
+        } else {
+          this.maybeDialPeer(hex);
+        }
+
+        if (candidates.length >= this.ALPHA) break;
+      }
+
+      if (candidates.length === 0) break;
+
+      const responses = await Promise.all(
+        candidates.map((nodeId) => {
+          const peerIdHex = nodeId.toString('hex');
+
+          if (!this.conn.getConnectedPeers().includes(peerIdHex)) {
+            return Promise.resolve([]);
+          }
+
+          queried.add(peerIdHex);
+          return this.sendFindNode(peerIdHex, targetNodeId);
+        })
+      );
+
+      let changed = false;
+
+      for (const nodes of responses) {
+        for (const node of nodes) {
+          if (node.equals(this.peerId)) continue;
+
+          const hex = node.toString('hex');
+          if (!shortlist.some((n) => n.equals(node))) {
+            shortlist.push(node);
+            changed = true;
+          }
+        }
+      }
+
+      shortlist.sort((a, b) =>
+        compareDistance(
+          xorDistance(a, targetNodeId),
+          xorDistance(b, targetNodeId)
+        )
+      );
+
+      shortlist = shortlist.slice(0, this.K);
+
+      if (0 === shortlist.length) break;
+
+      const newClosest = xorDistance(shortlist[0], targetNodeId).toString(
+        'hex'
+      );
+      if (newClosest === closestDistance && !changed) break;
+
+      closestDistance = newClosest;
     }
+
+    return shortlist;
+  }
+
+  sendFindNode(peerIdHex, targetNodeId, timeout = 5000) {
+    return new Promise((resolve) => {
+      const messageId = generateMessageId();
+      const key = messageId.toString('hex');
+
+      const timer = setTimeout(() => {
+        this.pendingRequests.delete(key);
+        resolve([]);
+      }, timeout);
+
+      this.pendingRequests.set(key, (nodes) => {
+        clearTimeout(timer);
+        resolve(nodes);
+      });
+
+      this.conn.send(peerIdHex, encodeFindNode(messageId, targetNodeId));
+    });
+  }
+
+  maybeDialPeer(peerIdHex) {
+    if (this.conn.getConnectedPeers().includes(peerIdHex)) return;
+    if (this.inflightDials.has(peerIdHex)) return;
+    if (this.inflightDials.size >= this.MAX_DIALS) return;
+
+    this.inflightDials.add(peerIdHex);
+
+    this.connect(peerIdHex)
+      .catch(() => {}) // ignore failures for now.
+      .finally(() => {
+        this.inflightDials.delete(peerIdHex);
+      });
   }
 
   async connect(targetPeerIdHex) {
