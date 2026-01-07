@@ -33,8 +33,8 @@ function isValidHexId(hex, expectedBytes = 32) {
   );
 }
 
-rl.on('line', (line) => {
-  const [cmd, arg] = line.trim().split(/\s+/);
+rl.on('line', async (line) => {
+  const [cmd, ...args] = line.trim().split(/\s+/);
 
   switch (cmd) {
     case 'id':
@@ -53,33 +53,75 @@ rl.on('line', (line) => {
       console.dir(node.routingTable.dump(), { depth: null });
       break;
 
-    case 'ping':
-      if (!isValidHexId(arg)) {
+    case 'ping': {
+      const [peerId] = args;
+      if (!isValidHexId(peerId)) {
         console.log('Usage: ping <64-hex-node-id>');
         break;
       }
-      node.ping(arg);
+      node.ping(peerId);
       break;
+    }
 
-    case 'find':
-      if (!isValidHexId(arg)) {
+    case 'find': {
+      const [nodeId] = args;
+      if (!isValidHexId(nodeId)) {
         console.log('Usage: find <64-hex-node-id>');
         break;
       }
-      node.iterativeFindNode(Buffer.from(arg, 'hex'));
+      const res = await node.iterativeFindNode(Buffer.from(nodeId, 'hex'));
+      console.log(
+        'Closest nodes:',
+        res.map((n) => n.toString('hex'))
+      );
       break;
+    }
 
-    case 'connect':
-      if (!isValidHexId(arg)) {
+    case 'connect': {
+      const [peerId] = args;
+      if (!isValidHexId(peerId)) {
         console.log('Usage: connect <64-hex-node-id>');
         break;
       }
-      if (arg === node.peerIdHex) {
+      if (peerId === node.peerIdHex) {
         console.log('Cannot connect to self');
         break;
       }
-      node.connect(arg);
+      node.connect(peerId);
       break;
+    }
+
+    case 'store': {
+      if (args.length < 2) {
+        console.log('Usage: store <key> <value>');
+        break;
+      }
+      const key = args[0];
+      const value = args.slice(1).join(' ');
+
+      console.log(`Storing key="${key}" value="${value}"`);
+      await node.storeValue(key, value);
+      console.log('Store complete');
+      break;
+    }
+
+    case 'get': {
+      if (args.length !== 1) {
+        console.log('Usage: get <key>');
+        break;
+      }
+      const key = args[0];
+
+      console.log(`Looking up key="${key}"`);
+      const value = await node.findValue(key);
+
+      if (value) {
+        console.log('Value found:', value.toString());
+      } else {
+        console.log('Value not found');
+      }
+      break;
+    }
 
     case 'help':
       console.log(`
@@ -91,6 +133,8 @@ Available commands:
   ping <nodeId>          Ping a peer
   find <nodeId>          FIND_NODE lookup
   connect <nodeId>       Connect to peer
+  store <key> <value>    STORE a value in the DHT
+  get <key>              FIND_VALUE lookup
   help                   Show this help
 `);
       break;

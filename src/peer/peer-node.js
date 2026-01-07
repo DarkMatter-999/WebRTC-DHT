@@ -10,7 +10,13 @@ import {
   generateMessageId,
   compareDistance,
   xorDistance,
-  randomNodeId,
+  encodeFindValueResponse,
+  decodeFindValueResponse,
+  generateKeyId,
+  encodeStore,
+  decodeStore,
+  encodeFindValue,
+  decodeFindValue,
 } from './utils.js';
 
 import {
@@ -19,6 +25,9 @@ import {
   MSG_PONG,
   MSG_FIND_NODE,
   MSG_FIND_NODE_RESPONSE,
+  MSG_FIND_VALUE_RESPONSE,
+  MSG_STORE,
+  MSG_FIND_VALUE,
 } from './constants.js';
 
 import { ConnectionManager } from './connection-manager.js';
@@ -26,6 +35,7 @@ import { RoutingTable } from './routing-table.js';
 
 const REFRESH_INTERVAL = 15 * 60 * 1000; // 15 minutes
 const CLEANUP_INTERVAL = 1 * 60 * 1000; // 1 minutes
+const STORE_TTL = 60 * 60 * 1000; // 1 hour
 
 export class PeerNode {
   constructor({ signalingUrl }) {
@@ -36,6 +46,8 @@ export class PeerNode {
 
     this.onFindNodeResponse = null;
     this.onPeerConnected = null;
+
+    this.store = new Map();
 
     this.pendingPings = new Map();
     this.pendingRequests = new Map();
@@ -200,6 +212,52 @@ export class PeerNode {
         break;
       }
 
+      case MSG_STORE: {
+        const { messageId, key, value } = decodeStore(buf);
+
+        const keyHex = key.toString('hex');
+        this.store.set(keyHex, {
+          value,
+          expires: Date.now() + STORE_TTL,
+        });
+
+        this.maybeAddNode(Buffer.from(peerIdHex, 'hex'));
+        break;
+      }
+
+      case MSG_FIND_VALUE: {
+        const { messageId, key } = decodeFindValue(buf);
+        const keyHex = key.toString('hex');
+
+        const entry = this.store.get(keyHex);
+        if (entry && entry.expires > Date.now()) {
+          this.conn.send(
+            peerIdHex,
+            encodeFindValueResponse(messageId, entry.value)
+          );
+          break;
+        }
+
+        const closest = this.routingTable.findClosest(key, this.K);
+        this.conn.send(
+          peerIdHex,
+          encodeFindValueResponse(messageId, null, closest)
+        );
+        break;
+      }
+
+      case MSG_FIND_VALUE_RESPONSE: {
+        const { messageId, value, nodes } = decodeFindValueResponse(buf);
+        const key = messageId.toString('hex');
+
+        const cb = this.pendingRequests.get(key);
+        if (!cb) return;
+
+        this.pendingRequests.delete(key);
+        cb({ value, nodes });
+        break;
+      }
+
       default:
         console.warn('Unknown message type:', type);
     }
@@ -344,5 +402,81 @@ export class PeerNode {
     }
     await this.conn.connect(targetPeerIdHex);
     console.log('Sent offer to', targetPeerIdHex);
+  }
+
+  async storeValue(key, value) {
+    const keyId = generateKeyId(key);
+    const closest = await this.iterativeFindNode(keyId);
+
+    for (const node of closest.slice(0, this.K)) {
+      const hex = node.toString('hex');
+      if (!this.conn.getConnectedPeers().includes(hex)) continue;
+
+      const msgId = generateMessageId();
+      this.conn.send(hex, encodeStore(msgId, keyId, value));
+    }
+
+    this.store.set(keyId.toString('hex'), {
+      value,
+      expires: Date.now() + STORE_TTL,
+    });
+  }
+
+  async findValue(key) {
+    const keyId = generateKeyId(key);
+    let shortlist = this.routingTable.findClosest(keyId, this.K);
+    const queried = new Set();
+
+    while (true) {
+      const batch = shortlist
+        .filter((n) => !queried.has(n.toString('hex')))
+        .slice(0, this.ALPHA);
+
+      if (0 === batch.length) break;
+
+      const responses = await Promise.all(
+        batch.map((node) => {
+          const hex = node.toString('hex');
+          queried.add(hex);
+
+          return new Promise((resolve) => {
+            const msgId = generateMessageId();
+            const keyHex = msgId.toString('hex');
+
+            const timer = setTimeout(() => {
+              this.pendingRequests.delete(keyHex);
+              resolve(null);
+            }, 5000);
+
+            this.pendingRequests.set(keyHex, (res) => {
+              clearTimeout(timer);
+              resolve(res);
+            });
+
+            this.conn.send(hex, encodeFindValue(msgId, keyId));
+          });
+        })
+      );
+
+      for (const res of responses) {
+        if (res?.value) return res.value;
+
+        if (res?.nodes) {
+          for (const n of res.nodes) {
+            if (!shortlist.some((x) => x.equals(n))) {
+              shortlist.push(n);
+            }
+          }
+        }
+      }
+
+      shortlist.sort((a, b) =>
+        compareDistance(xorDistance(a, keyId), xorDistance(b, keyId))
+      );
+
+      shortlist = shortlist.slice(0, this.K);
+    }
+
+    return null;
   }
 }
