@@ -14,6 +14,7 @@ import {
 } from './constants.js';
 
 const HEARTBEAT_INTERVAL = 60_000;
+const SEEN_SIGNAL_TTL = 60_000;
 
 export class ConnectionManager extends EventEmitter {
   constructor({ nodeId, signalingUrl }) {
@@ -28,6 +29,9 @@ export class ConnectionManager extends EventEmitter {
     this.peers = new Map();
     this.knownPeers = new Map();
     this.lastSeen = new Map();
+
+    this.seenSignalIds = new Set();
+    this.signalReversePath = new Map();
 
     this.isBootstrap = false;
     this.signalingClosed = false;
@@ -91,7 +95,7 @@ export class ConnectionManager extends EventEmitter {
 
     pc.onicecandidate = (e) => {
       if (!e.candidate) return;
-
+      if (!this.peers.has(peerIdHex)) return;
       this._sendSignal(peerIdHex, MSG_SIGNAL_ICE, e.candidate);
     };
 
@@ -165,6 +169,10 @@ export class ConnectionManager extends EventEmitter {
 
   async _handleDhtSignal(buf) {
     const { type, payload } = decodeSignal(buf);
+    const { messageId } = payload;
+
+    if (this.seenSignalIds.has(messageId)) return;
+    this.seenSignalIds.add(messageId);
 
     if (payload.to !== this.nodeIdHex) {
       if ((payload.ttl ?? 7) > 0) {
@@ -173,6 +181,10 @@ export class ConnectionManager extends EventEmitter {
       }
       return;
     }
+
+    setTimeout(() => {
+      this.seenSignalIds.delete(messageId);
+    }, SEEN_SIGNAL_TTL);
 
     switch (type) {
       case MSG_SIGNAL_OFFER:

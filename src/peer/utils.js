@@ -108,6 +108,10 @@ export function decodeFindNodeResponse(buf) {
 }
 
 export function encodeSignal(type, payload) {
+  if (!payload.messageId) {
+    payload.messageId = generateMessageId().toString('hex');
+  }
+
   const payloadBuf = Buffer.from(JSON.stringify(payload), 'utf8');
   const buf = Buffer.alloc(1 + payloadBuf.length);
   buf[0] = type;
@@ -118,6 +122,11 @@ export function encodeSignal(type, payload) {
 export function decodeSignal(buf) {
   const type = buf[0];
   const payload = JSON.parse(buf.subarray(1).toString());
+
+  if (!payload.messageId) {
+    throw new Error('Signal payload missing messageId');
+  }
+
   return { type, payload };
 }
 

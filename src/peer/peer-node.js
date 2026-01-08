@@ -434,12 +434,22 @@ export class PeerNode {
 
       if (0 === batch.length) break;
 
-      const responses = await Promise.all(
-        batch.map((node) => {
-          const hex = node.toString('hex');
-          queried.add(hex);
+      const connected = new Set(this.conn.getConnectedPeers());
 
-          return new Promise((resolve) => {
+      const queries = [];
+
+      for (const node of batch) {
+        const hex = node.toString('hex');
+
+        if (!connected.has(hex)) {
+          this.maybeDialPeer(hex);
+          continue;
+        }
+
+        queried.add(hex);
+
+        queries.push(
+          new Promise((resolve) => {
             const msgId = generateMessageId();
             const keyHex = msgId.toString('hex');
 
@@ -454,9 +464,16 @@ export class PeerNode {
             });
 
             this.conn.send(hex, encodeFindValue(msgId, keyId));
-          });
-        })
-      );
+          })
+        );
+      }
+
+      if (queries.length === 0) {
+        await new Promise((r) => setTimeout(r, 100));
+        continue;
+      }
+
+      const responses = await Promise.all(queries);
 
       for (const res of responses) {
         if (res?.value) return res.value;
