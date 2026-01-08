@@ -69,7 +69,7 @@ export class ConnectionManager extends EventEmitter {
     const channel = pc.createDataChannel('dht');
 
     this._setupChannel(channel, peerIdHex);
-    this.peers.set(peerIdHex, { pc, channel });
+    this.peers.set(peerIdHex, { pc, channel, pendingIce: [] });
 
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
@@ -214,9 +214,22 @@ export class ConnectionManager extends EventEmitter {
     if (this.peers.has(from)) return;
 
     const pc = this._createPeerConnection(from);
-    this.peers.set(from, { pc, channel: null });
+    this.peers.set(from, {
+      pc,
+      channel: null,
+      pendingIce: [],
+    });
 
     await pc.setRemoteDescription(sdp);
+
+    const peer = this.peers.get(from);
+    for (const c of peer.pendingIce) {
+      try {
+        await pc.addIceCandidate(c);
+      } catch {}
+    }
+    peer.pendingIce.length = 0;
+
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
 
@@ -227,15 +240,35 @@ export class ConnectionManager extends EventEmitter {
     const peer = this.peers.get(from);
     if (!peer) return;
 
-    if ('stable' !== peer.pc.signalingState) {
+    if (!peer.pc.remoteDescription) {
       await peer.pc.setRemoteDescription(sdp);
+
+      for (const c of peer.pendingIce) {
+        try {
+          await peer.pc.addIceCandidate(c);
+        } catch {}
+      }
+      peer.pendingIce.length = 0;
     }
   }
 
   async _addIceCandidate({ from, candidate }) {
     const peer = this.peers.get(from);
     if (!peer) return;
-    await peer.pc.addIceCandidate(candidate);
+
+    if (peer.pc.connectionState === 'closed') return;
+
+    if (!peer.pc.remoteDescription) {
+      peer.pendingIce.push(candidate);
+      return;
+    }
+
+    try {
+      await peer.pc.addIceCandidate(candidate);
+    } catch (err) {
+      console.error('addIceCandidate failed (ignored)');
+      console.error(err);
+    }
   }
 
   _sendSignal(peerIdHex, type, payload) {

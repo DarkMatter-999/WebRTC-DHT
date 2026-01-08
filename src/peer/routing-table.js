@@ -36,7 +36,13 @@ export class RoutingTable {
       return { action: 'added' };
     }
 
-    bucket.replacements.push(nodeId);
+    if (!bucket.replacements.some((id) => id.equals(nodeId))) {
+      bucket.replacements.push(nodeId);
+      if (bucket.replacements.length > this.k) {
+        bucket.replacements.shift();
+      }
+    }
+
     return { action: 'full', bucketIndex: i };
   }
 
