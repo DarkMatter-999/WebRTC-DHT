@@ -39,6 +39,7 @@ import { RoutingTable } from './routing-table.js';
 const REFRESH_INTERVAL = 15 * 60 * 1000; // 15 minutes
 const CLEANUP_INTERVAL = 1 * 60 * 1000; // 1 minutes
 const STORE_TTL = 60 * 60 * 1000; // 1 hour
+const REPUBLISH_INTERVAL = 60 * 60 * 1000; // 1 hour
 
 export class PeerNode {
   constructor({ signalingUrl }) {
@@ -108,6 +109,19 @@ export class PeerNode {
         if (now - ts > CLEANUP_INTERVAL) this.seenRequests.delete(k);
       }
     }, CLEANUP_INTERVAL);
+
+    this._republishTimer = setInterval(() => {
+      const now = Date.now();
+
+      for (const [keyHex, entry] of this.store) {
+        if (!entry.publisher) continue;
+
+        if (entry.expires - now < STORE_TTL / 2) {
+          const keyId = Buffer.from(keyHex, 'hex');
+          this.storeValue(keyId, entry.value).catch(() => {});
+        }
+      }
+    }, REPUBLISH_INTERVAL);
   }
 
   maybeAddNode(nodeId) {
@@ -465,8 +479,18 @@ export class PeerNode {
 
   async findValue(key) {
     const keyId = generateKeyId(key);
+    const keyHex = keyId.toString('hex');
+
+    const local = this.store.get(keyHex);
+    if (local && local.expires > Date.now()) {
+      return local.value;
+    }
+
     let shortlist = this.routingTable.findClosest(keyId, this.K);
     const queried = new Set();
+
+    let closestNode = shortlist[0] ?? null;
+    let closestQueried = null;
 
     while (true) {
       const batch = shortlist
@@ -489,19 +513,29 @@ export class PeerNode {
 
         queried.add(hex);
 
+        if (
+          !closestQueried ||
+          compareDistance(
+            xorDistance(node, keyId),
+            xorDistance(closestQueried, keyId)
+          ) < 0
+        ) {
+          closestQueried = node;
+        }
+
         queries.push(
           new Promise((resolve) => {
             const msgId = generateMessageId();
-            const keyHex = msgId.toString('hex');
+            const reqKey = msgId.toString('hex');
 
             const timer = setTimeout(() => {
-              this.pendingRequests.delete(keyHex);
-              resolve(null);
+              this.pendingRequests.delete(reqKey);
+              resolve({ responder: node, res: null });
             }, 5000);
 
-            this.pendingRequests.set(keyHex, (res) => {
+            this.pendingRequests.set(reqKey, (res) => {
               clearTimeout(timer);
-              resolve(res);
+              resolve({ responder: node, res });
             });
 
             this.conn.send(hex, encodeFindValue(msgId, keyId));
@@ -516,13 +550,53 @@ export class PeerNode {
 
       const responses = await Promise.all(queries);
 
-      for (const res of responses) {
-        if (res?.value) return res.value;
+      for (const { responder, res } of responses) {
+        if (!res) continue;
 
-        if (res?.nodes) {
+        this.maybeAddNode(responder);
+
+        if (res.value) {
+          this.store.set(keyHex, {
+            value: res.value,
+            expires: Date.now() + STORE_TTL,
+            publisher: false,
+          });
+
+          const cacheTarget =
+            closestQueried && !closestQueried.equals(responder)
+              ? closestQueried
+              : closestNode && !closestNode.equals(responder)
+                ? closestNode
+                : null;
+
+          if (
+            cacheTarget &&
+            this.conn.getConnectedPeers().includes(cacheTarget.toString('hex'))
+          ) {
+            const msgId = generateMessageId();
+            this.conn.send(
+              cacheTarget.toString('hex'),
+              encodeStore(msgId, keyId, res.value)
+            );
+          }
+
+          return res.value;
+        }
+
+        if (res.nodes) {
           for (const n of res.nodes) {
             if (!shortlist.some((x) => x.equals(n))) {
               shortlist.push(n);
+
+              if (
+                !closestNode ||
+                compareDistance(
+                  xorDistance(n, keyId),
+                  xorDistance(closestNode, keyId)
+                ) < 0
+              ) {
+                closestNode = n;
+              }
             }
           }
         }
