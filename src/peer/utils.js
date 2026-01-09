@@ -8,6 +8,7 @@ import {
   MSG_PING,
   MSG_PONG,
   MSG_STORE,
+  MSG_STORE_ACK,
   NODE_ID_LEN,
 } from './constants.js';
 
@@ -209,4 +210,14 @@ export function decodeFindValueResponse(buf) {
   }
 
   return { messageId, nodes };
+}
+
+export function encodeStoreAck(messageId) {
+  return Buffer.concat([Buffer.from([MSG_STORE_ACK]), messageId]);
+}
+
+export function decodeStoreAck(buf) {
+  return {
+    messageId: buf.subarray(1),
+  };
 }

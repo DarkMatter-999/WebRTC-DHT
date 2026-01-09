@@ -17,6 +17,8 @@ import {
   decodeStore,
   encodeFindValue,
   decodeFindValue,
+  encodeStoreAck,
+  decodeStoreAck,
 } from './utils.js';
 
 import {
@@ -27,6 +29,7 @@ import {
   MSG_FIND_NODE_RESPONSE,
   MSG_FIND_VALUE_RESPONSE,
   MSG_STORE,
+  MSG_STORE_ACK,
   MSG_FIND_VALUE,
 } from './constants.js';
 
@@ -219,9 +222,23 @@ export class PeerNode {
         this.store.set(keyHex, {
           value,
           expires: Date.now() + STORE_TTL,
+          publisher: false,
         });
 
+        this.conn.send(peerIdHex, encodeStoreAck(messageId));
         this.maybeAddNode(Buffer.from(peerIdHex, 'hex'));
+        break;
+      }
+
+      case MSG_STORE_ACK: {
+        const { messageId } = decodeStoreAck(buf);
+        const key = messageId.toString('hex');
+
+        const cb = this.pendingRequests.get(key);
+        if (!cb) return;
+
+        this.pendingRequests.delete(key);
+        cb(true);
         break;
       }
 
@@ -406,20 +423,44 @@ export class PeerNode {
 
   async storeValue(key, value) {
     const keyId = generateKeyId(key);
+    const keyHex = keyId.toString('hex');
     const closest = await this.iterativeFindNode(keyId);
+
+    const storedAt = [];
 
     for (const node of closest.slice(0, this.K)) {
       const hex = node.toString('hex');
       if (!this.conn.getConnectedPeers().includes(hex)) continue;
 
       const msgId = generateMessageId();
-      this.conn.send(hex, encodeStore(msgId, keyId, value));
+      const reqKey = msgId.toString('hex');
+
+      storedAt.push(
+        new Promise((resolve) => {
+          const timer = setTimeout(() => {
+            this.pendingRequests.delete(reqKey);
+            resolve(false);
+          }, 5000);
+
+          this.pendingRequests.set(reqKey, () => {
+            clearTimeout(timer);
+            resolve(true);
+          });
+
+          this.conn.send(hex, encodeStore(msgId, keyId, value));
+        })
+      );
     }
 
-    this.store.set(keyId.toString('hex'), {
+    const results = await Promise.all(storedAt);
+
+    this.store.set(keyHex, {
       value,
       expires: Date.now() + STORE_TTL,
+      publisher: true,
     });
+
+    return results.filter(Boolean).length;
   }
 
   async findValue(key) {
