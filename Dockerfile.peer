@@ -14,7 +14,11 @@ RUN npm install
 
 COPY . .
 
+COPY peer-entry.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
 ENV SIGNALLING_PORT=3000
 ENV SIGNALLING_HOST=signalling
 
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["npm", "run", "peer"]
