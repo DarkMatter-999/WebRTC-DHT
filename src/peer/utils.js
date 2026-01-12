@@ -221,3 +221,33 @@ export function decodeStoreAck(buf) {
     messageId: buf.subarray(1),
   };
 }
+
+export function encodeHasValue(messageId, key) {
+  const buf = Buffer.alloc(1 + 8 + NODE_ID_LEN);
+  buf[0] = MSG_HAS_VALUE;
+  messageId.copy(buf, 1);
+  key.copy(buf, 9);
+  return buf;
+}
+
+export function decodeHasValue(buf) {
+  return {
+    messageId: buf.subarray(1, 9),
+    key: buf.subarray(9, 9 + NODE_ID_LEN),
+  };
+}
+
+export function encodeHasValueResponse(messageId, has) {
+  const buf = Buffer.alloc(1 + 8 + 1);
+  buf[0] = MSG_HAS_VALUE_RESPONSE;
+  messageId.copy(buf, 1);
+  buf[9] = has ? 1 : 0;
+  return buf;
+}
+
+export function decodeHasValueResponse(buf) {
+  return {
+    messageId: buf.subarray(1, 9),
+    has: buf[9] === 1,
+  };
+}

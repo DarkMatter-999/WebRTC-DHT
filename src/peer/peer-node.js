@@ -19,6 +19,10 @@ import {
   decodeFindValue,
   encodeStoreAck,
   decodeStoreAck,
+  encodeHasValue,
+  decodeHasValue,
+  encodeHasValueResponse,
+  decodeHasValueResponse,
 } from './utils.js';
 
 import {
@@ -40,7 +44,7 @@ const REFRESH_INTERVAL = 15 * 60 * 1000; // 15 minutes
 const CLEANUP_INTERVAL = 1 * 60 * 1000; // 1 minutes
 const STORE_TTL = 60 * 60 * 1000; // 1 hour
 const REPUBLISH_INTERVAL = 60 * 60 * 1000; // 1 hour
-const REPAIR_INTERVAL = 1 * 1000; // 10 minutes
+const REPAIR_INTERVAL = 10 * 1000; // 10 minutes
 const CACHE_TTL = STORE_TTL / 4;
 
 export class PeerNode {
@@ -244,13 +248,10 @@ export class PeerNode {
         const existing = this.store.get(keyHex);
         if (existing && existing.expires > now) return;
 
-        const isPrimary = this._isPrimaryReplica(key);
-
         this.store.set(keyHex, {
           value,
           expires: Date.now() + STORE_TTL,
           publisher: false,
-          isPrimary,
           lastRepair: 0,
         });
 
@@ -303,6 +304,29 @@ export class PeerNode {
 
         this.pendingRequests.delete(key);
         cb({ value, nodes });
+        break;
+      }
+
+      case MSG_HAS_VALUE: {
+        const { messageId, key } = decodeHasValue(buf);
+        const keyHex = key.toString('hex');
+
+        const entry = this.store.get(keyHex);
+        const has = entry && entry.expires > Date.now();
+
+        this.conn.send(peerIdHex, encodeHasValueResponse(messageId, has));
+        break;
+      }
+
+      case MSG_HAS_VALUE_RESPONSE: {
+        const { messageId, has } = decodeHasValueResponse(buf);
+        const key = messageId.toString('hex');
+
+        const cb = this.pendingRequests.get(key);
+        if (!cb) return;
+
+        this.pendingRequests.delete(key);
+        cb(has);
         break;
       }
 
@@ -482,15 +506,12 @@ export class PeerNode {
       });
     }
 
-    if (this._isPrimaryReplica(keyId)) {
-      this.store.set(keyHex, {
-        value,
-        expires: Date.now() + STORE_TTL,
-        publisher: true,
-        isPrimary: true,
-        lastRepair: 0,
-      });
-    }
+    this.store.set(keyHex, {
+      value,
+      expires: Date.now() + STORE_TTL,
+      publisher: true,
+      lastRepair: 0,
+    });
 
     return success;
   }
@@ -578,7 +599,6 @@ export class PeerNode {
             value: res.value,
             expires: Date.now() + CACHE_TTL,
             publisher: false,
-            isPrimary: false,
             lastRepair: 0,
           });
 
@@ -636,34 +656,48 @@ export class PeerNode {
     const now = Date.now();
 
     for (const [keyHex, entry] of this.store) {
+      if (!entry.publisher) continue;
+
       if (entry.expires <= now) {
         this.store.delete(keyHex);
         continue;
       }
 
       const keyId = Buffer.from(keyHex, 'hex');
-
-      if (!entry.isPrimary) continue;
-
       const closest = await this.iterativeFindNode(keyId);
 
-      let targets = closest
+      const targets = closest
         .slice(0, this.K)
         .map((n) => n.toString('hex'))
         .filter((h) => this.conn.getConnectedPeers().includes(h))
         .filter((h) => h !== this.peerIdHex);
 
-      if (targets.length >= this.K) continue;
-
       for (const hex of targets) {
-        const msgId = generateMessageId();
-        this.conn.send(hex, encodeStore(msgId, keyId, entry.value));
+        const has = await this.hasValue(hex, keyId);
+        if (!has) {
+          const msgId = generateMessageId();
+          this.conn.send(hex, encodeStore(msgId, keyId, entry.value));
+        }
       }
     }
   }
 
-  _isPrimaryReplica(keyId) {
-    const closest = this.routingTable.findClosest(keyId, this.K);
-    return closest.some((n) => n.equals(this.peerId));
+  hasValue(peerHex, keyId, timeout = 2000) {
+    return new Promise((resolve) => {
+      const msgId = generateMessageId();
+      const reqKey = msgId.toString('hex');
+
+      const timer = setTimeout(() => {
+        this.pendingRequests.delete(reqKey);
+        resolve(false);
+      }, timeout);
+
+      this.pendingRequests.set(reqKey, (has) => {
+        clearTimeout(timer);
+        resolve(has);
+      });
+
+      this.conn.send(peerHex, encodeHasValue(msgId, keyId));
+    });
   }
 }

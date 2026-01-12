@@ -10,6 +10,8 @@ export const MSG_STORE = 0x05;
 export const MSG_STORE_ACK = 0x06;
 export const MSG_FIND_VALUE = 0x07;
 export const MSG_FIND_VALUE_RESPONSE = 0x08;
+export const MSG_HAS_VALUE = 0x09;
+export const MSG_HAS_VALUE_RESPONSE = 0x0a;
 
 export const MSG_SIGNAL_OFFER = 0xf0;
 export const MSG_SIGNAL_ANSWER = 0xf1;
