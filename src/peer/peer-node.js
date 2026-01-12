@@ -481,29 +481,49 @@ export class PeerNode {
     const keyId = generateKeyId(key);
     const keyHex = keyId.toString('hex');
     const closest = await this.iterativeFindNode(keyId);
+    const targets = closest.slice(0, this.K).map((n) => n.toString('hex'));
 
-    let success = 0;
+    for (const hex of targets) {
+      if (!this.conn.getConnectedPeers().includes(hex)) {
+        this.maybeDialPeer(hex);
+      }
+    }
 
-    for (const node of closest.slice(0, this.K)) {
-      const hex = node.toString('hex');
-      if (!this.conn.getConnectedPeers().includes(hex)) continue;
+    await new Promise((r) => setTimeout(r, 1500));
 
-      const msgId = generateMessageId();
-      const reqKey = msgId.toString('hex');
+    const connected = targets.filter((h) =>
+      this.conn.getConnectedPeers().includes(h)
+    );
 
-      success += await new Promise((resolve) => {
+    const W = Math.ceil(this.K / 2);
+    let acks = 0;
+
+    for (const hex of connected) {
+      const ok = await new Promise((resolve) => {
+        const msgId = generateMessageId();
+        const reqKey = msgId.toString('hex');
+
         const timer = setTimeout(() => {
           this.pendingRequests.delete(reqKey);
-          resolve(0);
+          resolve(false);
         }, 5000);
 
         this.pendingRequests.set(reqKey, () => {
           clearTimeout(timer);
-          resolve(1);
+          resolve(true);
         });
 
         this.conn.send(hex, encodeStore(msgId, keyId, value));
       });
+
+      if (ok) {
+        acks++;
+        if (acks >= W) break;
+      }
+    }
+
+    if (acks < W) {
+      throw new Error(`STORE failed: quorum not reached (${acks}/${W})`);
     }
 
     this.store.set(keyHex, {
@@ -513,7 +533,7 @@ export class PeerNode {
       lastRepair: 0,
     });
 
-    return success;
+    return true;
   }
 
   async findValue(key) {

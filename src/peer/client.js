@@ -100,8 +100,13 @@ rl.on('line', async (line) => {
       const value = args.slice(1).join(' ');
 
       console.log(`Storing key="${key}" value="${value}"`);
-      await node.storeValue(key, value);
-      console.log('Store complete');
+      try {
+        await node.storeValue(key, value);
+        console.log('Store complete (quorum reached)');
+      } catch (err) {
+        console.error('Store failed:', err.message);
+        console.log('Value NOT committed to the DHT.');
+      }
       break;
     }
 
