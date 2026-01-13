@@ -78,6 +78,13 @@ export class PeerNode {
       k: 20,
     });
 
+    this.conn.routeSignal = (targetHex) => {
+      const target = Buffer.from(targetHex, 'hex');
+      return this.routingTable
+        .findClosest(target, this.ALPHA)
+        .map((b) => b.toString('hex'));
+    };
+
     this.conn.on('message', (peerIdHex, buf) =>
       this.handleMessage(peerIdHex, buf)
     );
@@ -129,7 +136,6 @@ export class PeerNode {
 
         for (const node of closest.slice(0, this.K)) {
           const hex = node.toString('hex');
-          this.maybeDialPeer(hex);
           if (this.conn.getConnectedPeers().includes(hex)) {
             const msgId = generateMessageId();
             this.conn.send(hex, encodeStore(msgId, keyId, entry.record));
@@ -285,7 +291,6 @@ export class PeerNode {
             continue;
 
           clean.push(node);
-          this.maybeDialPeer(node.toString('hex'));
         }
 
         this.pendingRequests.delete(key);
@@ -498,7 +503,13 @@ export class PeerNode {
     return shortlist;
   }
 
-  sendFindNode(peerIdHex, targetNodeId, timeout = 5000) {
+  async sendFindNode(peerIdHex, targetNodeId, timeout = 5000) {
+    if (!this.conn.getConnectedPeers().includes(peerIdHex)) {
+      this.maybeDialPeer(peerIdHex);
+      const ok = await this.conn.waitForPeer(peerIdHex, 5000);
+      if (!ok) return [];
+    }
+
     return new Promise((resolve) => {
       const messageId = generateMessageId();
       const key = messageId.toString('hex');
@@ -525,7 +536,8 @@ export class PeerNode {
 
     this.inflightDials.add(peerIdHex);
 
-    this.connect(peerIdHex)
+    this.conn
+      .connect(peerIdHex)
       .catch(() => {}) // ignore failures for now.
       .finally(() => {
         this.inflightDials.delete(peerIdHex);
@@ -551,12 +563,6 @@ export class PeerNode {
       ts: Date.now(),
       pub: this.peerIdHex,
     };
-
-    for (const hex of targets) {
-      if (!this.conn.getConnectedPeers().includes(hex)) {
-        this.maybeDialPeer(hex);
-      }
-    }
 
     await new Promise((r) => setTimeout(r, 1500));
 
@@ -633,7 +639,6 @@ export class PeerNode {
         const hex = node.toString('hex');
 
         if (!connected.has(hex)) {
-          this.maybeDialPeer(hex);
           continue;
         }
 

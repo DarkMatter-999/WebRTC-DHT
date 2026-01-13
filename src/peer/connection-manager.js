@@ -26,11 +26,14 @@ export class ConnectionManager extends EventEmitter {
     this.signalingUrl = signalingUrl;
     this.socket = null;
 
+    this.routeSignal = null;
+
     this.peers = new Map();
     this.knownPeers = new Map();
+    this.peerState = new Map();
     this.lastSeen = new Map();
 
-    this.seenSignalIds = new Set();
+    this.seenSignalIds = new Map();
     this.signalReversePath = new Map();
 
     this.isBootstrap = false;
@@ -60,10 +63,18 @@ export class ConnectionManager extends EventEmitter {
       () => this._heartbeat(),
       HEARTBEAT_INTERVAL
     );
+
+    this._signalGc = setInterval(() => {
+      const now = Date.now();
+      for (const [k, ts] of this.seenSignalIds) {
+        if (now - ts > SEEN_SIGNAL_TTL) this.seenSignalIds.delete(k);
+      }
+    }, SEEN_SIGNAL_TTL);
   }
 
   async connect(peerIdHex) {
-    if (this.peers.has(peerIdHex)) return;
+    if (this.peerState.get(peerIdHex)) return;
+    this.peerState.set(peerIdHex, 'dialing');
 
     const pc = this._createPeerConnection(peerIdHex);
     const channel = pc.createDataChannel('dht');
@@ -101,11 +112,13 @@ export class ConnectionManager extends EventEmitter {
 
     pc.onconnectionstatechange = () => {
       if ('connected' === pc.connectionState) {
-        if (!this.peers.get(peerIdHex)?.connected) {
-          this.peers.get(peerIdHex).connected = true;
-          this.emit('peerConnected', peerIdHex);
-        }
+        this.peerState.set(peerIdHex, 'connected');
+        this.emit('peerConnected', peerIdHex);
         this._maybeCloseSignaling();
+      }
+      if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+        this.peerState.delete(peerIdHex);
+        this._dropPeer(peerIdHex);
       }
     };
 
@@ -171,13 +184,21 @@ export class ConnectionManager extends EventEmitter {
     const { type, payload } = decodeSignal(buf);
     const { messageId } = payload;
 
-    if (this.seenSignalIds.has(messageId)) return;
-    this.seenSignalIds.add(messageId);
+    const now = Date.now();
+    const ts = this.seenSignalIds.get(messageId);
+    if (ts && now - ts < SEEN_SIGNAL_TTL) return;
+    this.seenSignalIds.set(messageId, now);
 
     if (payload.to !== this.nodeIdHex) {
-      if ((payload.ttl ?? 7) > 0) {
-        payload.ttl--;
-        this.broadcast(encodeSignal(type, payload));
+      if (!this.routeSignal) return;
+
+      const nextHops = this.routeSignal(payload.to);
+
+      for (const hex of nextHops) {
+        const peer = this.peers.get(hex);
+        if (peer?.channel?.readyState === 'open') {
+          peer.channel.send(encodeSignal(type, payload));
+        }
       }
       return;
     }
@@ -212,6 +233,13 @@ export class ConnectionManager extends EventEmitter {
 
   async _acceptOffer({ from, sdp }) {
     if (this.peers.has(from)) return;
+
+    if (this.peerState.get(from) === 'dialing') {
+      if (this.nodeIdHex > from) {
+        return;
+      }
+    }
+    this.peerState.set(from, 'dialing');
 
     const pc = this._createPeerConnection(from);
     this.peers.set(from, {
@@ -281,15 +309,23 @@ export class ConnectionManager extends EventEmitter {
             : 'ice';
 
       this._sendSignalWS(wstype, peerIdHex, payload);
-    } else {
-      this.broadcast(
-        encodeSignal(type, {
-          from: this.nodeIdHex,
-          to: peerIdHex,
-          payload,
-          ttl: 7,
-        })
-      );
+      return;
+    }
+
+    if (!this.routeSignal) return;
+
+    const msg = encodeSignal(type, {
+      from: this.nodeIdHex,
+      to: peerIdHex,
+      payload,
+    });
+
+    const next = this.routeSignal(peerIdHex);
+    for (const hex of next) {
+      const peer = this.peers.get(hex);
+      if (peer?.channel?.readyState === 'open') {
+        peer.channel.send(msg);
+      }
     }
   }
 
@@ -313,7 +349,13 @@ export class ConnectionManager extends EventEmitter {
   }
 
   getConnectedPeers() {
-    return [...this.peers.keys()];
+    const out = [];
+    for (const [id, p] of this.peers) {
+      if (p.channel?.readyState === 'open') {
+        out.push(id);
+      }
+    }
+    return out;
   }
 
   getKnownPeerIds() {
@@ -359,6 +401,7 @@ export class ConnectionManager extends EventEmitter {
     this.peers.delete(peerIdHex);
     this.knownPeers.delete(peerIdHex);
     this.lastSeen.delete(peerIdHex);
+    this.peerState.delete(peerIdHex);
 
     this.emit('peerDisconnected', peerIdHex);
   }
