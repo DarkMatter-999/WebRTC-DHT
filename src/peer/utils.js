@@ -131,8 +131,9 @@ export function decodeSignal(buf) {
   return { type, payload };
 }
 
-export function encodeStore(messageId, key, value) {
-  const valueBuf = Buffer.from(value);
+export function encodeStore(messageId, key, record) {
+  const json = JSON.stringify(record);
+  const valueBuf = Buffer.from(json);
   const buf = Buffer.alloc(1 + 8 + NODE_ID_LEN + 4 + valueBuf.length);
 
   buf[0] = MSG_STORE;
@@ -148,9 +149,12 @@ export function decodeStore(buf) {
   const messageId = buf.subarray(1, 9);
   const key = buf.subarray(9, 9 + NODE_ID_LEN);
   const len = buf.readUInt32BE(9 + NODE_ID_LEN);
-  const value = buf.subarray(13 + NODE_ID_LEN, 13 + NODE_ID_LEN + len);
+  const json = buf
+    .subarray(13 + NODE_ID_LEN, 13 + NODE_ID_LEN + len)
+    .toString();
+  const record = JSON.parse(json);
 
-  return { messageId, key, value };
+  return { messageId, key, record };
 }
 
 export function encodeFindValue(messageId, key) {
@@ -172,9 +176,10 @@ export function decodeFindValue(buf) {
   return { messageId, key };
 }
 
-export function encodeFindValueResponse(messageId, value, nodes = []) {
-  if (value) {
-    const valueBuf = Buffer.from(value);
+export function encodeFindValueResponse(messageId, record, nodes = []) {
+  if (record) {
+    const json = JSON.stringify(record);
+    const valueBuf = Buffer.from(json);
     const buf = Buffer.alloc(1 + 8 + 1 + 4 + valueBuf.length);
     buf[0] = MSG_FIND_VALUE_RESPONSE;
     messageId.copy(buf, 1);
@@ -199,8 +204,9 @@ export function decodeFindValueResponse(buf) {
 
   if (found) {
     const len = buf.readUInt32BE(10);
-    const value = buf.subarray(14, 14 + len);
-    return { messageId, value };
+    const json = buf.subarray(14, 14 + len).toString();
+    const record = JSON.parse(json);
+    return { messageId, record };
   }
 
   const count = buf[10];

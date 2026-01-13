@@ -45,6 +45,7 @@ const CLEANUP_INTERVAL = 1 * 60 * 1000; // 1 minutes
 const STORE_TTL = 60 * 60 * 1000; // 1 hour
 const REPUBLISH_INTERVAL = 60 * 60 * 1000; // 1 hour
 const REPAIR_INTERVAL = 10 * 1000; // 10 minutes
+const LIVELINESS_INTERVAL = 5 * 60 * 1000; // 5 minutes
 const CACHE_TTL = STORE_TTL / 4;
 
 export class PeerNode {
@@ -124,7 +125,10 @@ export class PeerNode {
 
         if (entry.expires - now < STORE_TTL / 2) {
           const keyId = Buffer.from(keyHex, 'hex');
-          this.storeValue(keyId, entry.value).catch(() => {});
+          this.storeValue(
+            keyId,
+            Buffer.from(entry.record.data, 'base64')
+          ).catch(() => {});
         }
       }
     }, REPUBLISH_INTERVAL);
@@ -132,6 +136,31 @@ export class PeerNode {
     this._repairTimer = setInterval(() => {
       this._repairReplicas().catch(() => {});
     }, REPAIR_INTERVAL);
+
+    this._bucketPingTimer = setInterval(() => {
+      for (let i = 0; i < this.routingTable.buckets.length; i++) {
+        const node = this.routingTable.getLeastRecentlySeen(i);
+        if (!node) continue;
+
+        const hex = node.toString('hex');
+        if (!this.conn.getConnectedPeers().includes(hex)) {
+          const dead = this.routingTable.getLeastRecentlySeen(i);
+          if (dead) this.conn._dropPeer(dead.toString('hex'));
+          this.routingTable.evict(i);
+          this.routingTable.promoteReplacement(i);
+          continue;
+        }
+
+        this.pingWithTimeout(hex).then((alive) => {
+          if (!alive) {
+            const dead = this.routingTable.getLeastRecentlySeen(i);
+            if (dead) this.conn._dropPeer(dead.toString('hex'));
+            this.routingTable.evict(i);
+            this.routingTable.promoteReplacement(i);
+          }
+        });
+      }
+    }, LIVELINESS_INTERVAL);
   }
 
   maybeAddNode(nodeId) {
@@ -240,16 +269,22 @@ export class PeerNode {
       }
 
       case MSG_STORE: {
-        const { messageId, key, value } = decodeStore(buf);
+        const { messageId, key, record } = decodeStore(buf);
         const keyHex = key.toString('hex');
 
         const now = Date.now();
 
         const existing = this.store.get(keyHex);
-        if (existing && existing.expires > now) return;
+        if (
+          existing &&
+          existing.expires > now &&
+          !this._isNewer(record, existing.record)
+        ) {
+          return;
+        }
 
         this.store.set(keyHex, {
-          value,
+          record,
           expires: Date.now() + STORE_TTL,
           publisher: false,
           lastRepair: 0,
@@ -282,7 +317,7 @@ export class PeerNode {
         if (entry && entry.expires > Date.now()) {
           this.conn.send(
             peerIdHex,
-            encodeFindValueResponse(messageId, entry.value)
+            encodeFindValueResponse(messageId, entry.record)
           );
           break;
         }
@@ -296,14 +331,14 @@ export class PeerNode {
       }
 
       case MSG_FIND_VALUE_RESPONSE: {
-        const { messageId, value, nodes } = decodeFindValueResponse(buf);
+        const { messageId, record, nodes } = decodeFindValueResponse(buf);
         const key = messageId.toString('hex');
 
         const cb = this.pendingRequests.get(key);
         if (!cb) return;
 
         this.pendingRequests.delete(key);
-        cb({ value, nodes });
+        cb({ record, nodes });
         break;
       }
 
@@ -483,6 +518,12 @@ export class PeerNode {
     const closest = await this.iterativeFindNode(keyId);
     const targets = closest.slice(0, this.K).map((n) => n.toString('hex'));
 
+    const record = {
+      data: Buffer.from(value).toString('base64'),
+      ts: Date.now(),
+      pub: this.peerIdHex,
+    };
+
     for (const hex of targets) {
       if (!this.conn.getConnectedPeers().includes(hex)) {
         this.maybeDialPeer(hex);
@@ -491,14 +532,12 @@ export class PeerNode {
 
     await new Promise((r) => setTimeout(r, 1500));
 
-    const connected = targets.filter((h) =>
-      this.conn.getConnectedPeers().includes(h)
-    );
-
     const W = Math.ceil(this.K / 2);
     let acks = 0;
 
-    for (const hex of connected) {
+    for (const hex of targets) {
+      if (!this.conn.getConnectedPeers().includes(hex)) continue;
+
       const ok = await new Promise((resolve) => {
         const msgId = generateMessageId();
         const reqKey = msgId.toString('hex');
@@ -513,7 +552,7 @@ export class PeerNode {
           resolve(true);
         });
 
-        this.conn.send(hex, encodeStore(msgId, keyId, value));
+        this.conn.send(hex, encodeStore(msgId, keyId, record));
       });
 
       if (ok) {
@@ -527,7 +566,7 @@ export class PeerNode {
     }
 
     this.store.set(keyHex, {
-      value,
+      record,
       expires: Date.now() + STORE_TTL,
       publisher: true,
       lastRepair: 0,
@@ -542,14 +581,14 @@ export class PeerNode {
 
     const local = this.store.get(keyHex);
     if (local && local.expires > Date.now()) {
-      return local.value;
+      return Buffer.from(local.record.data, 'base64');
     }
 
     let shortlist = this.routingTable.findClosest(keyId, this.K);
     const queried = new Set();
 
-    let closestNode = shortlist[0] ?? null;
-    let closestQueried = null;
+    let bestDistance = null;
+    let bestRecord = null;
 
     while (true) {
       const batch = shortlist
@@ -572,16 +611,6 @@ export class PeerNode {
 
         queried.add(hex);
 
-        if (
-          !closestQueried ||
-          compareDistance(
-            xorDistance(node, keyId),
-            xorDistance(closestQueried, keyId)
-          ) < 0
-        ) {
-          closestQueried = node;
-        }
-
         queries.push(
           new Promise((resolve) => {
             const msgId = generateMessageId();
@@ -589,7 +618,7 @@ export class PeerNode {
 
             const timer = setTimeout(() => {
               this.pendingRequests.delete(reqKey);
-              resolve({ responder: node, res: null });
+              resolve(null);
             }, 5000);
 
             this.pendingRequests.set(reqKey, (res) => {
@@ -607,56 +636,23 @@ export class PeerNode {
         continue;
       }
 
-      const responses = await Promise.all(queries);
+      const results = (await Promise.all(queries)).filter(Boolean);
+      let foundCloser = false;
 
-      for (const { responder, res } of responses) {
-        if (!res) continue;
-
+      for (const { responder, res } of results) {
         this.maybeAddNode(responder);
 
-        if (res.value) {
-          this.store.set(keyHex, {
-            value: res.value,
-            expires: Date.now() + CACHE_TTL,
-            publisher: false,
-            lastRepair: 0,
-          });
-
-          const cacheTarget =
-            closestQueried && !closestQueried.equals(responder)
-              ? closestQueried
-              : closestNode && !closestNode.equals(responder)
-                ? closestNode
-                : null;
-
-          if (
-            cacheTarget &&
-            this.conn.getConnectedPeers().includes(cacheTarget.toString('hex'))
-          ) {
-            const msgId = generateMessageId();
-            this.conn.send(
-              cacheTarget.toString('hex'),
-              encodeStore(msgId, keyId, res.value)
-            );
+        if (res.record) {
+          if (!bestRecord || this._isNewer(res.record, bestRecord)) {
+            bestRecord = res.record;
           }
-
-          return res.value;
         }
 
         if (res.nodes) {
           for (const n of res.nodes) {
             if (!shortlist.some((x) => x.equals(n))) {
               shortlist.push(n);
-
-              if (
-                !closestNode ||
-                compareDistance(
-                  xorDistance(n, keyId),
-                  xorDistance(closestNode, keyId)
-                ) < 0
-              ) {
-                closestNode = n;
-              }
+              foundCloser = true;
             }
           }
         }
@@ -665,11 +661,26 @@ export class PeerNode {
       shortlist.sort((a, b) =>
         compareDistance(xorDistance(a, keyId), xorDistance(b, keyId))
       );
-
       shortlist = shortlist.slice(0, this.K);
+
+      const newDist = xorDistance(shortlist[0], keyId).toString('hex');
+      if (bestDistance === newDist && !foundCloser) break;
+      bestDistance = newDist;
     }
 
-    return null;
+    if (!bestRecord) return null;
+
+    const existing = this.store.get(keyHex);
+    if (!existing || this._isNewer(bestRecord, existing.record)) {
+      this.store.set(keyHex, {
+        record: bestRecord,
+        expires: Date.now() + CACHE_TTL,
+        publisher: false,
+        lastRepair: 0,
+      });
+    }
+
+    return Buffer.from(bestRecord.data, 'base64');
   }
 
   async _repairReplicas() {
@@ -696,7 +707,7 @@ export class PeerNode {
         const has = await this.hasValue(hex, keyId);
         if (!has) {
           const msgId = generateMessageId();
-          this.conn.send(hex, encodeStore(msgId, keyId, entry.value));
+          this.conn.send(hex, encodeStore(msgId, keyId, entry.record));
         }
       }
     }
@@ -719,5 +730,11 @@ export class PeerNode {
 
       this.conn.send(peerHex, encodeHasValue(msgId, keyId));
     });
+  }
+
+  _isNewer(a, b) {
+    if (!b) return true;
+    if (a.ts !== b.ts) return a.ts > b.ts;
+    return a.pub > b.pub;
   }
 }
