@@ -117,18 +117,23 @@ export class PeerNode {
       }
     }, CLEANUP_INTERVAL);
 
-    this._republishTimer = setInterval(() => {
+    this._republishTimer = setInterval(async () => {
       const now = Date.now();
 
       for (const [keyHex, entry] of this.store) {
         if (!entry.publisher) continue;
+        if (entry.expires <= now) continue;
 
-        if (entry.expires - now < STORE_TTL / 2) {
-          const keyId = Buffer.from(keyHex, 'hex');
-          this.storeValue(
-            keyId,
-            Buffer.from(entry.record.data, 'base64')
-          ).catch(() => {});
+        const keyId = Buffer.from(keyHex, 'hex');
+        const closest = await this.iterativeFindNode(keyId);
+
+        for (const node of closest.slice(0, this.K)) {
+          const hex = node.toString('hex');
+          this.maybeDialPeer(hex);
+          if (this.conn.getConnectedPeers().includes(hex)) {
+            const msgId = generateMessageId();
+            this.conn.send(hex, encodeStore(msgId, keyId, entry.record));
+          }
         }
       }
     }, REPUBLISH_INTERVAL);
@@ -238,6 +243,27 @@ export class PeerNode {
         const closest = this.routingTable.findClosest(targetNodeId, this.K);
 
         this.conn.send(peerIdHex, encodeFindNodeResponse(messageId, closest));
+
+        for (const [keyHex, entry] of this.store) {
+          const keyId = Buffer.from(keyHex, 'hex');
+          const peerId = Buffer.from(peerIdHex, 'hex');
+
+          const closest = this.routingTable.findClosest(keyId, this.K);
+          const furthest = closest[closest.length - 1];
+
+          const shouldStore =
+            !furthest ||
+            compareDistance(
+              xorDistance(peerId, keyId),
+              xorDistance(furthest, keyId)
+            ) < 0;
+
+          if (shouldStore) {
+            const msgId = generateMessageId();
+            this.conn.send(peerIdHex, encodeStore(msgId, keyId, entry.record));
+          }
+        }
+
         break;
       }
 
@@ -255,12 +281,11 @@ export class PeerNode {
             !Buffer.isBuffer(node) ||
             node.length !== this.peerId.length ||
             node.equals(this.peerId)
-          ) {
+          )
             continue;
-          }
 
           clean.push(node);
-          this.maybeAddNode(node);
+          this.maybeDialPeer(node.toString('hex'));
         }
 
         this.pendingRequests.delete(key);
@@ -393,50 +418,55 @@ export class PeerNode {
   async iterativeFindNode(targetNodeId) {
     let shortlist = this.routingTable.findClosest(targetNodeId, this.K);
     const queried = new Set();
-    let closestDistance = null;
+    let closestQueried = null;
 
     while (true) {
       const connected = new Set(this.conn.getConnectedPeers());
 
-      const candidates = [];
+      const batch = [];
 
       for (const node of shortlist) {
         const hex = node.toString('hex');
         if (queried.has(hex)) continue;
 
-        if (connected.has(hex)) {
-          candidates.push(node);
-        } else {
+        if (!connected.has(hex)) {
           this.maybeDialPeer(hex);
+          continue;
         }
 
-        if (candidates.length >= this.ALPHA) break;
+        batch.push(node);
+        if (batch.length >= this.ALPHA) break;
       }
 
-      if (candidates.length === 0) break;
+      if (0 === batch.length) {
+        await new Promise((r) => setTimeout(r, 100));
+        continue;
+      }
 
       const responses = await Promise.all(
-        candidates.map((nodeId) => {
-          const peerIdHex = nodeId.toString('hex');
-
-          if (!this.conn.getConnectedPeers().includes(peerIdHex)) {
-            return Promise.resolve([]);
+        batch.map((node) => {
+          const hex = node.toString('hex');
+          queried.add(hex);
+          if (
+            !closestQueried ||
+            compareDistance(
+              xorDistance(node, targetNodeId),
+              xorDistance(closestQueried, targetNodeId)
+            ) < 0
+          ) {
+            closestQueried = node;
           }
-
-          queried.add(peerIdHex);
-          return this.sendFindNode(peerIdHex, targetNodeId);
+          return this.sendFindNode(hex, targetNodeId);
         })
       );
 
       let changed = false;
 
       for (const nodes of responses) {
-        for (const node of nodes) {
-          if (node.equals(this.peerId)) continue;
-
-          const hex = node.toString('hex');
-          if (!shortlist.some((n) => n.equals(node))) {
-            shortlist.push(node);
+        for (const n of nodes) {
+          if (n.equals(this.peerId)) continue;
+          if (!shortlist.some((x) => x.equals(n))) {
+            shortlist.push(n);
             changed = true;
           }
         }
@@ -453,18 +483,16 @@ export class PeerNode {
 
       if (0 === shortlist.length) break;
 
-      const unqueried = shortlist.filter(
-        (n) => !queried.has(n.toString('hex'))
-      );
-
-      if (unqueried.length === 0) break;
-
-      const newClosest = xorDistance(shortlist[0], targetNodeId).toString(
-        'hex'
-      );
-      if (newClosest === closestDistance && !changed) break;
-
-      closestDistance = newClosest;
+      const best = shortlist[0];
+      if (
+        closestQueried &&
+        compareDistance(
+          xorDistance(best, targetNodeId),
+          xorDistance(closestQueried, targetNodeId)
+        ) >= 0
+      ) {
+        break;
+      }
     }
 
     return shortlist;
@@ -586,8 +614,8 @@ export class PeerNode {
 
     let shortlist = this.routingTable.findClosest(keyId, this.K);
     const queried = new Set();
+    let closestQueried = null;
 
-    let bestDistance = null;
     let bestRecord = null;
 
     while (true) {
@@ -610,6 +638,16 @@ export class PeerNode {
         }
 
         queried.add(hex);
+
+        if (
+          !closestQueried ||
+          compareDistance(
+            xorDistance(node, keyId),
+            xorDistance(closestQueried, keyId)
+          ) < 0
+        ) {
+          closestQueried = node;
+        }
 
         queries.push(
           new Promise((resolve) => {
@@ -645,6 +683,25 @@ export class PeerNode {
         if (res.record) {
           if (!bestRecord || this._isNewer(res.record, bestRecord)) {
             bestRecord = res.record;
+
+            const closer = shortlist.find(
+              (n) =>
+                compareDistance(
+                  xorDistance(n, keyId),
+                  xorDistance(responder, keyId)
+                ) < 0
+            );
+
+            if (
+              closer &&
+              this.conn.getConnectedPeers().includes(closer.toString('hex'))
+            ) {
+              const msgId = generateMessageId();
+              this.conn.send(
+                closer.toString('hex'),
+                encodeStore(msgId, keyId, res.record)
+              );
+            }
           }
         }
 
@@ -663,9 +720,17 @@ export class PeerNode {
       );
       shortlist = shortlist.slice(0, this.K);
 
-      const newDist = xorDistance(shortlist[0], keyId).toString('hex');
-      if (bestDistance === newDist && !foundCloser) break;
-      bestDistance = newDist;
+      const best = shortlist[0];
+
+      if (
+        closestQueried &&
+        compareDistance(
+          xorDistance(best, keyId),
+          xorDistance(closestQueried, keyId)
+        ) >= 0
+      ) {
+        break;
+      }
     }
 
     if (!bestRecord) return null;
