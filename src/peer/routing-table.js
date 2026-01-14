@@ -69,25 +69,29 @@ export class RoutingTable {
   }
 
   findClosest(targetId, count = this.k) {
-    const allNodes = [];
+    const results = [];
+    const start = this._bucketIndex(targetId);
 
-    for (const bucket of this.buckets) {
+    for (let d = 0; d < this.buckets.length && results.length < count; d++) {
+      const i = d % 2 === 0 ? start + d : start - d;
+      if (i < 0 || i >= this.buckets.length) continue;
+
+      const bucket = this.buckets[i];
       for (const id of bucket.nodes) {
-        allNodes.push(id);
+        results.push(id);
+        if (results.length >= count) break;
       }
-    }
 
-    allNodes.sort((a, b) =>
-      compareDistance(xorDistance(a, targetId), xorDistance(b, targetId))
-    );
-
-    for (const bucket of this.buckets) {
       if (bucket.nodes.length > 0) {
         bucket.lastUsed = Date.now();
       }
     }
 
-    return allNodes.slice(0, count);
+    results.sort((a, b) =>
+      compareDistance(xorDistance(a, targetId), xorDistance(b, targetId))
+    );
+
+    return results.slice(0, count);
   }
 
   size() {

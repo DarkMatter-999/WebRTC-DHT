@@ -44,7 +44,7 @@ const REFRESH_INTERVAL = 15 * 60 * 1000; // 15 minutes
 const CLEANUP_INTERVAL = 1 * 60 * 1000; // 1 minutes
 const STORE_TTL = 60 * 60 * 1000; // 1 hour
 const REPUBLISH_INTERVAL = 60 * 60 * 1000; // 1 hour
-const REPAIR_INTERVAL = 10 * 1000; // 10 minutes
+const REPAIR_INTERVAL = 10 * 60 * 1000; // 10 minutes
 const LIVELINESS_INTERVAL = 5 * 60 * 1000; // 5 minutes
 const CACHE_TTL = STORE_TTL / 4;
 
@@ -66,7 +66,9 @@ export class PeerNode {
     this.ALPHA = 3;
     this.K = 20;
     this.MAX_DIALS = 4;
+    this.DIAL_BACKOFF = 60_000;
     this.inflightDials = new Set();
+    this.failedDials = new Map();
 
     this.conn = new ConnectionManager({
       nodeId: this.peerId,
@@ -92,6 +94,7 @@ export class PeerNode {
     this.conn.on('peerConnected', (peerIdHex) => {
       const nodeId = Buffer.from(peerIdHex, 'hex');
       this.maybeAddNode(nodeId);
+      this.failedDials.delete(peerIdHex);
       this.onPeerConnected?.(peerIdHex);
     });
 
@@ -424,8 +427,10 @@ export class PeerNode {
     let shortlist = this.routingTable.findClosest(targetNodeId, this.K);
     const queried = new Set();
     let closestQueried = null;
+    const MAX_ROUNDS = 5;
+    let rounds = 0;
 
-    while (true) {
+    while (rounds++ < MAX_ROUNDS) {
       const connected = new Set(this.conn.getConnectedPeers());
 
       const batch = [];
@@ -443,10 +448,7 @@ export class PeerNode {
         if (batch.length >= this.ALPHA) break;
       }
 
-      if (0 === batch.length) {
-        await new Promise((r) => setTimeout(r, 100));
-        continue;
-      }
+      if (0 === batch.length) break;
 
       const responses = await Promise.all(
         batch.map((node) => {
@@ -486,18 +488,7 @@ export class PeerNode {
 
       shortlist = shortlist.slice(0, this.K);
 
-      if (0 === shortlist.length) break;
-
-      const best = shortlist[0];
-      if (
-        closestQueried &&
-        compareDistance(
-          xorDistance(best, targetNodeId),
-          xorDistance(closestQueried, targetNodeId)
-        ) >= 0
-      ) {
-        break;
-      }
+      if (!changed) break;
     }
 
     return shortlist;
@@ -534,11 +525,18 @@ export class PeerNode {
     if (this.inflightDials.has(peerIdHex)) return;
     if (this.inflightDials.size >= this.MAX_DIALS) return;
 
+    const lastFail = this.failedDials.get(peerIdHex);
+    if (lastFail && Date.now() - lastFail < this.DIAL_BACKOFF) {
+      return;
+    }
+
     this.inflightDials.add(peerIdHex);
 
     this.conn
       .connect(peerIdHex)
-      .catch(() => {}) // ignore failures for now.
+      .catch(() => {
+        this.failedDials.set(peerIdHex, Date.now());
+      })
       .finally(() => {
         this.inflightDials.delete(peerIdHex);
       });
