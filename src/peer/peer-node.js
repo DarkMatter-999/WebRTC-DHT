@@ -48,7 +48,26 @@ const REPAIR_INTERVAL = 10 * 60 * 1000; // 10 minutes
 const LIVELINESS_INTERVAL = 5 * 60 * 1000; // 5 minutes
 const CACHE_TTL = STORE_TTL / 4;
 
+/**
+ * PeerNode implements a Kademlia-style DHT node.
+ *
+ * Responsibilities:
+ * - Maintain a routing table
+ * - Manage peer connections and signaling
+ * - Store, retrieve, and replicate key–value records
+ * - Execute iterative FIND_NODE and FIND_VALUE lookups
+ * - Perform background maintenance (refresh, republish, repair, liveness)
+ */
 export class PeerNode {
+  /**
+   * Create a new DHT peer node.
+   *
+   * Generates a node ID, initializes routing state, storage,
+   * and sets up the underlying connection manager.
+   *
+   * @param {object} opts
+   * @param {string} opts.signalingUrl - Bootstrap signaling server URL
+   */
   constructor({ signalingUrl }) {
     this.signalingUrl = signalingUrl;
 
@@ -103,6 +122,12 @@ export class PeerNode {
     });
   }
 
+  /**
+   * Start the peer node.
+   *
+   * Connects to the signaling server, initializes background
+   * maintenance tasks, and begins routing-table upkeep.
+   */
   async start() {
     console.log('Connecting to signalling server at', this.signalingUrl);
     this.conn.start();
@@ -177,6 +202,13 @@ export class PeerNode {
     }, LIVELINESS_INTERVAL);
   }
 
+  /**
+   * Attempt to insert a node into the routing table.
+   *
+   * Applies Kademlia eviction rules if the target bucket is full.
+   *
+   * @param {Buffer} nodeId
+   */
   maybeAddNode(nodeId) {
     const result = this.routingTable.addOrUpdateNode(nodeId);
     if (!result || result.action !== 'full') return;
@@ -203,6 +235,15 @@ export class PeerNode {
     });
   }
 
+  /**
+   * Handle an incoming protocol message from a peer.
+   *
+   * Decodes the message and dispatches it to the appropriate
+   * protocol handler (PING, FIND_NODE, STORE, etc).
+   *
+   * @param {string} peerIdHex
+   * @param {Buffer} buf
+   */
   handleMessage(peerIdHex, buf) {
     const { type, content } = decodeMessage(buf);
 
@@ -403,10 +444,24 @@ export class PeerNode {
     }
   }
 
+  /**
+   * Send a PING to a peer.
+   *
+   * @param {string} peerIdHex
+   */
   ping(peerIdHex) {
     this.conn.send(peerIdHex, encodePing(this.peerId));
   }
 
+  /**
+   * Send a PING and wait for a PONG or timeout.
+   *
+   * Used for liveness checks and bucket eviction decisions.
+   *
+   * @param {string} peerIdHex
+   * @param {number} timeout
+   * @returns {Promise<boolean>}
+   */
   pingWithTimeout(peerIdHex, timeout = 3000) {
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
@@ -423,6 +478,15 @@ export class PeerNode {
     });
   }
 
+  /**
+   * Perform an iterative FIND_NODE lookup.
+   *
+   * Queries peers in parallel (α at a time), progressively
+   * refining the shortlist until convergence or timeout.
+   *
+   * @param {Buffer} targetNodeId
+   * @returns {Promise<Buffer[]>}
+   */
   async iterativeFindNode(targetNodeId) {
     let shortlist = this.routingTable.findClosest(targetNodeId, this.K);
     const queried = new Set();
@@ -494,6 +558,20 @@ export class PeerNode {
     return shortlist;
   }
 
+  /**
+   * Send a FIND_NODE request to a peer and await the response.
+   *
+   * If the peer is not currently connected, this method will attempt to
+   * dial the peer and wait up to {@code timeout} milliseconds for the
+   * connection to become ready.
+   *
+   * @param {string} peerIdHex - Hex-encoded identifier of the target peer.
+   * @param {Buffer} targetNodeId - The node ID being searched for.
+   * @param {number} [timeout=5000] - Maximum time to wait for a response,
+   *   in milliseconds.
+   * @returns {Promise<Buffer[]>} Resolves with an array of node IDs returned
+   *   by the peer, or an empty array on timeout or failure.
+   */
   async sendFindNode(peerIdHex, targetNodeId, timeout = 5000) {
     if (!this.conn.getConnectedPeers().includes(peerIdHex)) {
       this.maybeDialPeer(peerIdHex);
@@ -520,6 +598,15 @@ export class PeerNode {
     });
   }
 
+  /**
+   * Attempt to establish a connection to a peer if not already connected.
+   *
+   * The method respects the maximum number of concurrent dials and back‑off
+   * policy for peers that have recently failed to connect.
+   *
+   * @param {string} peerIdHex - Hex-encoded identifier of the peer to dial.
+   * @returns {void}
+   */
   maybeDialPeer(peerIdHex) {
     if (this.conn.getConnectedPeers().includes(peerIdHex)) return;
     if (this.inflightDials.has(peerIdHex)) return;
@@ -542,6 +629,16 @@ export class PeerNode {
       });
   }
 
+  /**
+   * Initiate a connection to a target peer, respecting the node ID ordering rule.
+   *
+   * If the local node's ID is lexicographically greater than the target's,
+   * the connection attempt is aborted (as the remote node is expected to
+   * initiate the connection instead).
+   *
+   * @param {string} targetPeerIdHex - Hex-encoded identifier of the target peer.
+   * @returns {Promise<void>} Resolves once the connection (or no‑op) completes.
+   */
   async connect(targetPeerIdHex) {
     if (this.nodeIdHex > targetPeerIdHex) {
       return;
@@ -550,6 +647,16 @@ export class PeerNode {
     console.log('Sent offer to', targetPeerIdHex);
   }
 
+  /**
+   * Store a value in the DHT.
+   *
+   * Publishes the record to the K closest peers and waits
+   * for a write quorum before succeeding.
+   *
+   * @param {string|Buffer} key
+   * @param {Buffer|string} value
+   * @returns {Promise<boolean>}
+   */
   async storeValue(key, value) {
     const keyId = generateKeyId(key);
     const keyHex = keyId.toString('hex');
@@ -607,6 +714,15 @@ export class PeerNode {
     return true;
   }
 
+  /**
+   * Retrieve a value from the DHT.
+   *
+   * Uses iterative FIND_VALUE lookup with caching and
+   * opportunistic replication.
+   *
+   * @param {string|Buffer} key
+   * @returns {Promise<Buffer|null>}
+   */
   async findValue(key) {
     const keyId = generateKeyId(key);
     const keyHex = keyId.toString('hex');
@@ -751,6 +867,14 @@ export class PeerNode {
     return Buffer.from(bestRecord.data, 'base64');
   }
 
+  /**
+   * Repair replicas for locally published keys.
+   *
+   * Ensures that the value is stored on the correct
+   * K closest peers over time.
+   *
+   * @private
+   */
   async _repairReplicas() {
     const now = Date.now();
 
@@ -781,6 +905,17 @@ export class PeerNode {
     }
   }
 
+  /**
+   * Check if a peer holds a value for a given key.
+   *
+   * Sends a HAS_VALUE request and resolves with the peer's response
+   * or `false` if the request times out.
+   *
+   * @param {string} peerHex - Hex-encoded peer identifier.
+   * @param {Buffer} keyId - The key identifier to query.
+   * @param {number} [timeout=2000] - Timeout in milliseconds.
+   * @returns {Promise<boolean>} Resolves to `true` if the peer reports having the value, otherwise `false`.
+   */
   hasValue(peerHex, keyId, timeout = 2000) {
     return new Promise((resolve) => {
       const msgId = generateMessageId();
@@ -800,6 +935,16 @@ export class PeerNode {
     });
   }
 
+  /**
+   * Compare two records and determine which is newer.
+   *
+   * Newer records are chosen by timestamp, then publisher ID.
+   *
+   * @private
+   * @param {object} a
+   * @param {object} b
+   * @returns {boolean}
+   */
   _isNewer(a, b) {
     if (!b) return true;
     if (a.ts !== b.ts) return a.ts > b.ts;

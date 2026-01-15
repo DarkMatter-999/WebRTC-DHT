@@ -2,6 +2,23 @@
 
 import { execSync } from 'child_process';
 
+/**
+ * Docker helper script.
+ *
+ * This script provides commands to build, start, stop, and manage Docker
+ * containers using Docker Compose. It supports scaling the number of peer
+ * containers via the `--peers` option.
+ *
+ * Usage:
+ *   npm run docker -- <command> [--peers <number>]
+ *
+ * Commands:
+ *   build      Build Docker images
+ *   up         Start containers
+ *   down       Stop containers
+ *   all        Build and start containers
+ */
+
 const COMPOSE_FILE = 'docker-compose.yml';
 
 const args = process.argv.slice(2);

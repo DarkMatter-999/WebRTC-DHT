@@ -1,9 +1,22 @@
 import { xorDistance, compareDistance } from './utils.js';
 
+/**
+ * Kademlia-style routing table.
+ * Buckets are indexed by first differing bit.
+ */
 export class RoutingTable {
+  /**
+   * @param {object} opts
+   * @param {Buffer} opts.nodeId
+   * @param {number} [opts.k=20]
+   */
   constructor({ nodeId, k = 20 }) {
     this.nodeId = nodeId;
     this.k = k;
+
+    /**
+     * Buckets indexed by distance bit.
+     */
     this.buckets = Array.from(
       { length: nodeId.length * 8 }, // 256 buckets for SHA-256
       () => ({
@@ -14,6 +27,12 @@ export class RoutingTable {
     );
   }
 
+  /**
+   * Add or update a node in the routing table.
+   *
+   * @param {Buffer} nodeId
+   * @returns {{action: string, bucketIndex?: number}|undefined}
+   */
   addOrUpdateNode(nodeId) {
     if (!Buffer.isBuffer(nodeId)) return;
     if (nodeId.length !== this.nodeId.length) return;
@@ -46,6 +65,11 @@ export class RoutingTable {
     return { action: 'full', bucketIndex: i };
   }
 
+  /**
+   * Remove a node from the routing table.
+   *
+   * @param {Buffer} nodeId
+   */
   removeNode(nodeId) {
     const bucketIndex = this._bucketIndex(nodeId);
     const bucket = this.buckets[bucketIndex];
@@ -56,18 +80,42 @@ export class RoutingTable {
     }
   }
 
+  /**
+   * Update a node's recency.
+   *
+   * @param {Buffer} nodeId
+   * @returns {{action: string, bucketIndex?: number}|undefined}
+   */
   touch(nodeId) {
     return this.addOrUpdateNode(nodeId);
   }
 
+  /**
+   * Get least recently seen node in a bucket.
+   *
+   * @param {number} bucketIndex
+   * @returns {Buffer|undefined}
+   */
   getLeastRecentlySeen(bucketIndex) {
     return this.buckets[bucketIndex].nodes[0];
   }
 
+  /**
+   * Evict least recently seen node from a bucket.
+   *
+   * @param {number} bucketIndex
+   */
   evict(bucketIndex) {
     this.buckets[bucketIndex].nodes.shift();
   }
 
+  /**
+   * Find closest nodes to a target ID.
+   *
+   * @param {Buffer} targetId
+   * @param {number} count
+   * @returns {Buffer[]}
+   */
   findClosest(targetId, count = this.k) {
     const results = [];
     const start = this._bucketIndex(targetId);
@@ -94,10 +142,20 @@ export class RoutingTable {
     return results.slice(0, count);
   }
 
+  /**
+   * Total number of nodes in the table.
+   *
+   * @returns {number}
+   */
   size() {
     return this.buckets.reduce((sum, b) => sum + b.nodes.length, 0);
   }
 
+  /**
+   * Dump routing table contents for debugging.
+   *
+   * @returns {{index: number, size: number, nodes: string[]}[]}
+   */
   dump() {
     return this.buckets
       .map((bucket, i) => ({
@@ -108,6 +166,13 @@ export class RoutingTable {
       .filter((b) => b.size > 0);
   }
 
+  /**
+   * Compute bucket index based on first differing bit.
+   *
+   * @private
+   * @param {Buffer} nodeId
+   * @returns {number}
+   */
   _bucketIndex(nodeId) {
     const dist = xorDistance(this.nodeId, nodeId);
 
@@ -125,6 +190,11 @@ export class RoutingTable {
     return this.buckets.length - 1;
   }
 
+  /**
+   * Promote a replacement node into the main bucket.
+   *
+   * @param {number} bucketIndex
+   */
   promoteReplacement(bucketIndex) {
     const bucket = this.buckets[bucketIndex];
     const replacement = bucket.replacements.shift();

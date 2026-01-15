@@ -1,6 +1,21 @@
 import readline from 'readline';
 import { PeerNode } from './peer-node.js';
 
+/**
+ * Interactive CLI client for a DHT peer node.
+ *
+ * This script starts a PeerNode and exposes a REPL-like interface
+ * allowing you to:
+ * - Inspect routing table state
+ * - Manually connect to peers
+ * - Perform FIND_NODE lookups
+ * - Store and retrieve values from the DHT
+ *
+ * Intended usage:
+ * - Debugging and exploration
+ * - Manual testing of DHT behavior
+ */
+
 const SIGNAL_URL = `ws://${process.env.SIGNALLING_HOST || 'localhost'}:${process.env.SIGNALLING_PORT || 3000}`;
 
 const node = new PeerNode({ signalingUrl: SIGNAL_URL });
@@ -25,6 +40,13 @@ const rl = readline.createInterface({
   output: process.stdout,
 });
 
+/**
+ * Validate that a string is a properly sized hex-encoded node ID.
+ *
+ * @param {string} hex
+ * @param {number} expectedBytes
+ * @returns {boolean}
+ */
 function isValidHexId(hex, expectedBytes = 32) {
   return (
     typeof hex === 'string' &&
@@ -33,6 +55,11 @@ function isValidHexId(hex, expectedBytes = 32) {
   );
 }
 
+/**
+ * Handle CLI commands.
+ *
+ * Each command maps directly to a DHT or debugging operation.
+ */
 rl.on('line', async (line) => {
   const [cmd, ...args] = line.trim().split(/\s+/);
 

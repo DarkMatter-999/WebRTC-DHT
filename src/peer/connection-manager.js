@@ -13,10 +13,25 @@ import {
   MSG_SIGNAL_OFFER,
 } from './constants.js';
 
-const HEARTBEAT_INTERVAL = 60_000;
+const HEARTBEAT_INTERVAL = 5 * 60 * 1000;
 const SEEN_SIGNAL_TTL = 60_000;
 
+/**
+ * Manages peer discovery, signaling, and WebRTC data-channel connections.
+ *
+ * This class abstracts over both direct WebSocket signaling (for bootstrap)
+ * and routed, DHT-based signaling once peers are connected. It is responsible
+ * for connection lifecycle management, message routing, heartbeats, and
+ * connection cleanup.
+ */
 export class ConnectionManager extends EventEmitter {
+  /**
+   * Create a new connection manager.
+   *
+   * @param {object} opts
+   * @param {Buffer} opts.nodeId - Local node ID.
+   * @param {string} [opts.signalingUrl] - Optional bootstrap signaling server.
+   */
   constructor({ nodeId, signalingUrl }) {
     super();
 
@@ -40,6 +55,13 @@ export class ConnectionManager extends EventEmitter {
     this.signalingClosed = false;
   }
 
+  /**
+   * Start the connection manager.
+   *
+   * Opens the WebSocket signaling connection (if configured), registers
+   * with the signaling server, starts peer discovery, and begins periodic
+   * heartbeat and garbage-collection tasks.
+   */
   start() {
     if (!this.signalingUrl) return;
 
@@ -72,6 +94,15 @@ export class ConnectionManager extends EventEmitter {
     }, SEEN_SIGNAL_TTL);
   }
 
+  /**
+   * Initiate an outbound WebRTC connection to a peer.
+   *
+   * Creates a peer connection, opens a data channel, generates an SDP offer,
+   * and sends it to the remote peer using either direct signaling or routed
+   * DHT signaling.
+   *
+   * @param {string} peerIdHex - Remote peer ID (hex-encoded).
+   */
   async connect(peerIdHex) {
     if (this.peerState.get(peerIdHex)) return;
     this.peerState.set(peerIdHex, 'dialing');
@@ -88,6 +119,14 @@ export class ConnectionManager extends EventEmitter {
     this._sendSignal(peerIdHex, MSG_SIGNAL_OFFER, offer);
   }
 
+  /**
+   * Send a binary message to a connected peer.
+   *
+   * The message is sent only if the peer's data channel is currently open.
+   *
+   * @param {string} peerIdHex
+   * @param {Buffer} buffer
+   */
   send(peerIdHex, buffer) {
     const peer = this.peers.get(peerIdHex);
     if ('open' === peer?.channel?.readyState) {
@@ -95,6 +134,16 @@ export class ConnectionManager extends EventEmitter {
     }
   }
 
+  /**
+   * Create (or reuse) a WebRTC peer connection for a peer.
+   *
+   * This sets up ICE handling, connection state transitions, and data-channel
+   * negotiation callbacks.
+   *
+   * @private
+   * @param {string} peerIdHex
+   * @returns {RTCPeerConnection}
+   */
   _createPeerConnection(peerIdHex) {
     if (this.peers.has(peerIdHex)) {
       return this.peers.get(peerIdHex).pc;
@@ -129,6 +178,16 @@ export class ConnectionManager extends EventEmitter {
     return pc;
   }
 
+  /**
+   * Configure a WebRTC data channel for a peer.
+   *
+   * Handles channel lifecycle events, incoming messages, heartbeat tracking,
+   * and dispatches protocol messages to the appropriate handlers.
+   *
+   * @private
+   * @param {RTCDataChannel} channel
+   * @param {string} peerIdHex
+   */
   _setupChannel(channel, peerIdHex) {
     channel.binaryType = 'arraybuffer';
 
@@ -161,6 +220,15 @@ export class ConnectionManager extends EventEmitter {
     };
   }
 
+  /**
+   * Handle messages received from the WebSocket signaling server.
+   *
+   * This includes peer discovery responses and direct offer/answer/ICE
+   * messages during the bootstrap phase.
+   *
+   * @private
+   * @param {object} msg
+   */
   _handleSignal(msg) {
     if ('peers' === msg.type) {
       if (
@@ -180,6 +248,15 @@ export class ConnectionManager extends EventEmitter {
     if ('ice' === msg.type) this._addIceCandidate(msg);
   }
 
+  /**
+   * Handle a routed DHT signaling message.
+   *
+   * Messages are de-duplicated, forwarded if they are not addressed to this
+   * node, or applied locally if they target this node.
+   *
+   * @private
+   * @param {Buffer} buf
+   */
   async _handleDhtSignal(buf) {
     const { type, payload } = decodeSignal(buf);
     const { messageId } = payload;
@@ -231,6 +308,15 @@ export class ConnectionManager extends EventEmitter {
     }
   }
 
+  /**
+   * Accept and respond to an incoming SDP offer.
+   *
+   * Performs glare resolution, sets the remote description, applies any
+   * queued ICE candidates, and sends an SDP answer.
+   *
+   * @private
+   * @param {{from: string, sdp: any}} param0
+   */
   async _acceptOffer({ from, sdp }) {
     if (this.peers.has(from)) return;
 
@@ -264,6 +350,12 @@ export class ConnectionManager extends EventEmitter {
     this._sendSignal(from, MSG_SIGNAL_ANSWER, answer);
   }
 
+  /**
+   * Apply an incoming SDP answer to an existing connection.
+   *
+   * @private
+   * @param {{from: string, sdp: any}} param0
+   */
   async _acceptAnswer({ from, sdp }) {
     const peer = this.peers.get(from);
     if (!peer) return;
@@ -280,6 +372,14 @@ export class ConnectionManager extends EventEmitter {
     }
   }
 
+  /**
+   * Add an ICE candidate to a peer connection.
+   *
+   * Candidates received before the remote description is set are queued.
+   *
+   * @private
+   * @param {{from: string, candidate: any}} param0
+   */
   async _addIceCandidate({ from, candidate }) {
     const peer = this.peers.get(from);
     if (!peer) return;
@@ -299,6 +399,17 @@ export class ConnectionManager extends EventEmitter {
     }
   }
 
+  /**
+   * Send a signaling message to a peer.
+   *
+   * Uses the WebSocket signaling server if available, otherwise falls back
+   * to routed DHT signaling via connected peers.
+   *
+   * @private
+   * @param {string} peerIdHex
+   * @param {number} type
+   * @param {any} payload
+   */
   _sendSignal(peerIdHex, type, payload) {
     if (WebSocket.OPEN === this.socket?.readyState) {
       const wstype =
@@ -329,6 +440,14 @@ export class ConnectionManager extends EventEmitter {
     }
   }
 
+  /**
+   * Send a signaling message over the WebSocket connection.
+   *
+   * @private
+   * @param {string} type
+   * @param {string} to
+   * @param {any} payload
+   */
   _sendSignalWS(type, to, payload) {
     this.socket.send(
       JSON.stringify({
@@ -340,6 +459,11 @@ export class ConnectionManager extends EventEmitter {
     );
   }
 
+  /**
+   * Close the WebSocket signaling connection once it is no longer required.
+   *
+   * @private
+   */
   _maybeCloseSignaling() {
     if (this.isBootstrap) return;
     if (this.signalingClosed) return;
@@ -348,6 +472,11 @@ export class ConnectionManager extends EventEmitter {
     this.socket.close();
   }
 
+  /**
+   * Return IDs of peers with an open data channel.
+   *
+   * @returns {string[]}
+   */
   getConnectedPeers() {
     const out = [];
     for (const [id, p] of this.peers) {
@@ -358,10 +487,20 @@ export class ConnectionManager extends EventEmitter {
     return out;
   }
 
+  /**
+   * Return IDs of all peers that have ever connected.
+   *
+   * @returns {string[]}
+   */
   getKnownPeerIds() {
     return [...this.knownPeers.keys()];
   }
 
+  /**
+   * Broadcast a message to all currently connected peers.
+   *
+   * @param {Buffer} buf
+   */
   broadcast(buf) {
     for (const { channel } of this.knownPeers.values()) {
       if ('open' === channel.readyState) {
@@ -370,6 +509,14 @@ export class ConnectionManager extends EventEmitter {
     }
   }
 
+  /**
+   * Periodic maintenance task.
+   *
+   * Sends heartbeat pings to peers and drops connections that have been
+   * inactive for too long.
+   *
+   * @private
+   */
   _heartbeat() {
     const now = Date.now();
 
@@ -387,6 +534,15 @@ export class ConnectionManager extends EventEmitter {
     }
   }
 
+  /**
+   * Tear down and forget a peer connection.
+   *
+   * Closes the data channel and peer connection, removes all internal state,
+   * and emits a `peerDisconnected` event.
+   *
+   * @private
+   * @param {string} peerIdHex
+   */
   _dropPeer(peerIdHex) {
     const peer = this.peers.get(peerIdHex);
     if (!peer) return;
